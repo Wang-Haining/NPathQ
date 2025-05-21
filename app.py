@@ -110,14 +110,19 @@ def upload_pdf(pdf: gr.File, state: dict):
 def answer(msg: str, state: dict):
     if "chain" not in state:
         raise gr.Error("Upload a PDF first.")
+
     hist: List[Tuple[str, str]] = state.get("history", [])
-    chain = state["chain"]
-    resp = chain({"question": msg, "chat_history": hist})["answer"] + WATERMARK
-    hist.append((msg, resp))
+    resp = state["chain"].invoke({"question": msg, "chat_history": hist})["answer"]
+    hist.append((msg, resp + WATERMARK))
     state["history"] = hist
-    messages = [{"role": "user", "content": q} if i % 2 == 0 else {"role": "assistant", "content": a}
-                for i, (q, a) in enumerate(sum(([m] for m in hist), []))]
+
+    messages = []
+    for q, a in hist:
+        messages.append({"role": "user", "content": q})
+        messages.append({"role": "assistant", "content": a})
+
     return messages, state
+
 
 # ------------------------------ UI ----------------------------------------
 def build_ui(port: int):

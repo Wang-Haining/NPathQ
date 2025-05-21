@@ -62,7 +62,10 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 1024):
     )
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.chat_template is None:
-        print(f"Warning: Tokenizer for {model_id} does not have a chat_template defined. Defaulting to basic concatenation which might be suboptimal.")
+        print(f"WARNING: Tokenizer for {model_id} does not have a chat_template defined in its config. The model may not behave as expected. Falling back to basic concatenation.")
+    # You can also print the template if it exists to verify it during startup
+    # if tokenizer.chat_template:
+    #     print(f"Using chat template for {model_id}:\n{tokenizer.chat_template}")
     return llm, tokenizer
 
 def pdf_to_text(pdf_path: Path) -> str:
@@ -87,25 +90,54 @@ def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instanc
         {"role": "user", "content": "Based on the following context:\n\n{context}\n\nAnswer this question:\n{question}"}
     ]
 
+    prompt_template_str = ""
     try:
-        prompt_template_str = tokenizer_instance.apply_chat_template(
-            messages_for_template,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+        if tokenizer_instance.chat_template: # Check if chat_template actually exists
+            prompt_template_str = tokenizer_instance.apply_chat_template(
+                messages_for_template,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            print("\n---- DEBUG: Applied Chat Template (for combine_docs_chain) ----")
+            print(prompt_template_str)
+            print("-------------------------------------------------------------\n")
+        else:
+            # This fallback will likely perform poorly with Llama 3.1
+            print("WARNING: No chat_template found on tokenizer. Using basic fallback prompt format.")
+            prompt_template_str = f"{system_prompt_content}\n\nContext:\n{{context}}\n\nQuestion:\n{{question}}\n\nAnswer:"
+
     except Exception as e:
-        print(f"Error applying chat template: {e}. Falling back to basic prompt string.")
+        print(f"ERROR applying chat template: {e}. Falling back to basic prompt string.")
         prompt_template_str = f"{system_prompt_content}\n\nContext:\n{{context}}\n\nQuestion:\n{{question}}\n\nAnswer:"
+        print("\n---- DEBUG: Fallback Prompt Template (for combine_docs_chain) ----")
+        print(prompt_template_str)
+        print("-------------------------------------------------------------\n")
+
 
     final_prompt = PromptTemplate(
         template=prompt_template_str,
         input_variables=["context", "question"]
     )
 
+    # TODO: If issues persist, customize condense_question_prompt here using a similar chat templating approach.
+    # from langchain.prompts import ChatPromptTemplate as LangchainChatPromptTemplate
+    # from langchain.schema import SystemMessage, HumanMessage
+    # condense_messages = [
+    #     SystemMessage(content="Given the chat history and a follow-up question, rephrase the follow-up question to be a standalone question."),
+    #     # This part is tricky because chat_history is a string here.
+    #     # A more robust way would be to create a small chain just for condensing
+    #     # that can properly format chat_history into multiple turns for apply_chat_template.
+    #     # For now, we focus on combine_docs_chain.
+    # ]
+    # condense_prompt_str = tokenizer_instance.apply_chat_template(...)
+    # custom_condense_question_prompt = PromptTemplate.from_template(condense_prompt_str_for_condense_step)
+
+
     chain = ConversationalRetrievalChain.from_llm(
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
         combine_docs_chain_kwargs={"prompt": final_prompt},
+        # condense_question_prompt=custom_condense_question_prompt, # If you implement it
         return_source_documents=False
     )
     return chain
@@ -176,70 +208,21 @@ def reset_session(state: Dict[str, Any]):
 # ------------------------------ UI ----------------------------------------
 CUSTOM_CSS = """
 body {font-family: 'Inter', sans-serif;}
-
 /* Titles */
-#main-title-md h1 { /* Gradio typically wraps # markdown in <h1> */
-    text-align: center !important;
-    font-size: 2.8em !important; /* Increased size */
-    margin-bottom: 0.1em !important; /* Reduced space to subtitle */
-    color: #333 !important;
-}
-#sub-title-md p { /* Subtitle is plain markdown, likely <p> */
-    text-align: center !important;
-    font-size: 1.3em !important; /* Increased size */
-    color: #555 !important;
-    margin-top: 0 !important;
-    margin-bottom: 2em !important; /* Space before chat controls */
-}
-
+#main-title-md h1 {text-align: center !important; font-size: 2.8em !important; margin-bottom: 0.1em !important; color: #333 !important;}
+#sub-title-md p {text-align: center !important; font-size: 1.3em !important; color: #555 !important; margin-top: 0 !important; margin-bottom: 2em !important;}
 /* Chat alignment */
-.gradio-chatbot > .wrap { 
-    display: flex;
-    flex-direction: column;
-}
-.gradio-chatbot .message-wrap[data-testid="user"] {
-    align-self: flex-start !important;
-}
-.gradio-chatbot .message-wrap[data-testid="user"] > div.message {
-    background-color: #DCF8C6 !important; /* Light green for user */
-    color: #000 !important;
-    max-width: 70% !important;
-    border-radius: 10px !important;
-}
-.gradio-chatbot .message-wrap[data-testid="assistant"] {
-    align-self: flex-end !important;
-}
-.gradio-chatbot .message-wrap[data-testid="assistant"] > div.message {
-    background-color: #ECE5DD !important; /* Light beige for assistant */
-    color: #000 !important;
-    max-width: 70% !important;
-    border-radius: 10px !important;
-}
-
+.gradio-chatbot > .wrap {display: flex; flex-direction: column;}
+.gradio-chatbot .message-wrap[data-testid="user"] {align-self: flex-start !important;}
+.gradio-chatbot .message-wrap[data-testid="user"] > div.message {background-color: #DCF8C6 !important; color: #000 !important; max-width: 70% !important; border-radius: 10px !important;}
+.gradio-chatbot .message-wrap[data-testid="assistant"] {align-self: flex-end !important;}
+.gradio-chatbot .message-wrap[data-testid="assistant"] > div.message {background-color: #ECE5DD !important; color: #000 !important; max-width: 70% !important; border-radius: 10px !important;}
 /* Footer */
-#footer-info-md p { /* Footer is plain markdown, likely <p> */
-    font-size: 0.8em !important;
-    color: #888 !important; /* Lighter gray for footer */
-    text-align: center !important;
-    margin-top: 25px !important;
-    padding: 15px !important;
-    border-top: 1px solid #eee !important;
-}
-#footer-info-md a { /* Style links in footer */
-    color: #007bff !important;
-    text-decoration: none !important;
-}
-#footer-info-md a:hover {
-    text-decoration: underline !important;
-}
-
+#footer-info-md p {font-size: 0.8em !important; color: #888 !important; text-align: center !important; margin-top: 25px !important; padding: 15px !important; border-top: 1px solid #eee !important;}
+#footer-info-md a {color: #007bff !important; text-decoration: none !important;}
+#footer-info-md a:hover {text-decoration: underline !important;}
 /* Device/Model info */
-#device-model-info-md p {
-    font-size: 0.75em !important;
-    color: #aaa !important;
-    text-align: center !important;
-    margin-top: 5px !important;
-}
+#device-model-info-md p {font-size: 0.75em !important; color: #aaa !important; text-align: center !important; margin-top: 5px !important;}
 """
 
 FOOTER_TEXT = (
@@ -252,40 +235,20 @@ FOOTER_TEXT = (
 def build_ui(port: int):
     global MODEL_ID
     with gr.Blocks(css=CUSTOM_CSS) as demo:
-
-        gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md") # Main Title
-        gr.Markdown("The First Neuropathology Report QA Agent", elem_id="sub-title-md") # Subtitle
-
-        app_state = gr.State({
-            "chain": None,
-            "langchain_history": [],
-            "ui_messages": [{"role": "system", "content": "Please upload a PDF to begin."}]
-        })
-
+        gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
+        gr.Markdown("The First Neuropathology Report QA Agent", elem_id="sub-title-md")
+        app_state = gr.State({"chain": None, "langchain_history": [], "ui_messages": [{"role": "system", "content": "Please upload a PDF to begin."}]})
         with gr.Row():
             pdf_file = gr.File(label="Upload PDF", file_types=[".pdf"])
             reset_btn = gr.Button("Reset Chat & PDF")
-
-        chat = gr.Chatbot(
-            value=[{"role": "system", "content": "Please upload a PDF to begin."}],
-            label=f"{AGENT_NAME} Chat", # Label might not be visible if layout="panel" takes over
-            height=480,
-            show_copy_button=True,
-            layout="panel",
-            type="messages"
-        )
+        chat = gr.Chatbot(value=[{"role": "system", "content": "Please upload a PDF to begin."}], label=f"{AGENT_NAME} Chat", height=480, show_copy_button=True, layout="panel", type="messages")
         box  = gr.Textbox(lines=1, placeholder="Type your question and press Enter…", label="Your Question", scale=7)
-
         pdf_file.change(upload_pdf, inputs=[pdf_file, app_state], outputs=[chat, app_state])
         reset_btn.click(reset_session, inputs=[app_state], outputs=[chat, app_state])
-
         box.submit(fn=answer, inputs=[box, app_state], outputs=[chat, app_state])
         box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False)
-
-        gr.Markdown(FOOTER_TEXT, elem_id="footer-info-md") # Static Footer
+        gr.Markdown(FOOTER_TEXT, elem_id="footer-info-md")
         gr.Markdown(f"<small>Device: {_device()} | LLM: {MODEL_ID}</small>", elem_id="device-model-info-md")
-
-
     print(f"Starting {AGENT_NAME} on http://0.0.0.0:{port}")
     demo.launch(server_name="0.0.0.0", server_port=port, share=False)
 
@@ -297,26 +260,39 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=7860, help="Port to run the Gradio app on.")
     parser.add_argument("--max_new_tokens", type=int, default=1024, help="Max new tokens for LLM generation.")
     args = parser.parse_args()
-
     MODEL_ID = args.model
-
     system_prompt_path = Path(args.prompt)
     if not system_prompt_path.exists():
         print(f"Error: System prompt file not found at {system_prompt_path}")
-        default_prompt_content = "You are a helpful AI assistant specialized in answering questions about neuropathology reports. Use the provided context from the report to answer accurately and concisely. If the information is not in the context, say you don't know."
+        default_prompt_content = (
+            "You are NPathQ, an expert AI assistant specializing in neuropathology. Your primary purpose is to help users "
+            "understand and extract information specifically from neuropathology reports. You have been trained with extensive "
+            "knowledge in medical science, with a deep focus on neuropathological conditions, terminology, and report structures.\n\n"
+            "When answering questions, please adhere to the following guidelines:\n\n"
+            "1.  **Evidence is Key:** Base your answers *solely and exclusively* on the information present in the provided PDF document "
+            "(the neuropathology report). Do not use any external knowledge beyond what's necessary to understand the medical terms "
+            "within the report itself.\n"
+            "2.  **Clear and Straightforward Language:** Communicate in a friendly, clear, and direct manner. Explain findings as if "
+            "you're a knowledgeable colleague making the information accessible. Avoid overly complex sentence structures. While the "
+            "content is medical, your explanation should be as straightforward as possible.\n"
+            "3.  **Acknowledge Document Source:** When providing information, make it evident that it comes directly from the document. "
+            "Phrases like, \"According to the report...\", \"The document states that...\", or \"Based on the findings in this PDF...\" "
+            "are helpful.\n"
+            "4.  **Honesty About Availability:** If the information required to answer a question cannot be found within the provided PDF, "
+            "clearly and politely state that the information is not available in this particular document. For example, you could say, "
+            "\"I couldn't find that specific detail in this report,\" or \"This report does not seem to contain information on that topic.\"\n"
+            "5.  **No Hallucination or Speculation:** It is absolutely crucial that you do not invent, infer beyond what is explicitly "
+            "stated, or speculate on information not present in the text. Stick strictly to the provided evidence.\n\n"
+            "Your goal is to be a helpful, accurate, and reliable guide to the contents of the neuropathology report."
+        )
         try:
-            with open(system_prompt_path, "w") as f:
-                f.write(default_prompt_content)
-            print(f"Created a default system prompt at: {system_prompt_path}")
+            with open(system_prompt_path, "w") as f: f.write(default_prompt_content)
+            print(f"Created a default system prompt ({args.prompt}) with the new recommended content.")
             SYSTEM_PROMPT = default_prompt_content
         except Exception as e:
-            print(f"Could not create default system prompt: {e}. Exiting.")
-            exit(1)
-    else:
-        SYSTEM_PROMPT = system_prompt_path.read_text().strip()
-
+            print(f"Could not create default system prompt: {e}. Exiting."); exit(1)
+    else: SYSTEM_PROMPT = system_prompt_path.read_text().strip()
     print(f"Loading LLM ({MODEL_ID}) and Tokenizer...")
     LLM, TOKENIZER = load_llm_and_tokenizer(MODEL_ID, max_new=args.max_new_tokens)
     print("LLM and Tokenizer loaded.")
-
     build_ui(args.port)

@@ -60,8 +60,6 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 1024):
         model=model_id,
         max_new_tokens=max_new,
         trust_remote_code=True,
-        temperature=0.7,
-        top_p=0.95,
         tensor_parallel_size=1,
         dtype="bfloat16",
         streaming=True,
@@ -101,7 +99,7 @@ def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instanc
 
     prompt_template_str = ""
     try:
-        if tokenizer_instance.chat_template:  # check if chat_template actually exists
+        if tokenizer_instance.chat_template:
             prompt_template_str = tokenizer_instance.apply_chat_template(
                 messages_for_template, tokenize=False, add_generation_prompt=True
             )
@@ -109,7 +107,6 @@ def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instanc
             print(prompt_template_str)
             print("-------------------------------------------------------------\n")
         else:
-            # this fallback will likely perform poorly with Llama 3.1
             print(
                 "WARNING: No chat_template found on tokenizer. Using basic fallback prompt format."
             )
@@ -142,8 +139,12 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     if pdf_file_obj is None:
         raise gr.Error("Please upload a PDF first.")
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
+        missing = []
+        if LLM is None: missing.append("LLM")
+        if TOKENIZER is None: missing.append("Tokenizer")
+        if SYSTEM_PROMPT is None: missing.append("System Prompt")
         raise gr.Error(
-            "LLM, Tokenizer, or System Prompt not initialized. Please restart."
+            f"{', '.join(missing)} not initialized. Please ensure system_prompt.md exists and restart the application."
         )
 
     txt = pdf_to_text(Path(pdf_file_obj.name))
@@ -295,8 +296,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--prompt",
-        default="system_prompt.md",
-        help="Path to the system prompt Markdown file.",
+        default="system_prompt.md", # This argument specifies the file name
+        help="Path to the system prompt Markdown file. This file MUST exist.",
     )
     parser.add_argument(
         "--port", type=int, default=7860, help="Port to run the Gradio app on."
@@ -308,12 +309,36 @@ if __name__ == "__main__":
         help="Max new tokens for LLM generation.",
     )
     args = parser.parse_args()
+
     MODEL_ID = args.model
+
     system_prompt_path = Path(args.prompt)
     if not system_prompt_path.exists():
-        raise ValueError(f"Error: System prompt file not found at {system_prompt_path}")
+        print(f"ERROR: System prompt file '{system_prompt_path}' not found.")
+        print("Please create this file with your desired system prompt or check the path.")
+        exit(1) # exit if the file is not found
+
+    try:
+        SYSTEM_PROMPT = system_prompt_path.read_text().strip()
+        if not SYSTEM_PROMPT: # check if the file is empty
+            print(f"ERROR: System prompt file '{system_prompt_path}' is empty.")
+            print("Please ensure the file contains a valid system prompt.")
+            exit(1)
+        print(f"Successfully loaded system prompt from '{system_prompt_path}'.")
+    except Exception as e:
+        print(f"ERROR: Could not read system prompt file '{system_prompt_path}': {e}")
+        exit(1)
 
     print(f"Loading LLM ({MODEL_ID}) and Tokenizer...")
     LLM, TOKENIZER = load_llm_and_tokenizer(MODEL_ID, max_new=args.max_new_tokens)
     print("LLM and Tokenizer loaded.")
+
+    # final check, though the exit(1) calls above should prevent reaching here if there's an issue
+    if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
+        missing_init = []
+        if LLM is None: missing_init.append("LLM")
+        if TOKENIZER is None: missing_init.append("Tokenizer")
+        if SYSTEM_PROMPT is None: missing_init.append("SYSTEM_PROMPT text")
+        raise RuntimeError(f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting.")
+
     build_ui(args.port)

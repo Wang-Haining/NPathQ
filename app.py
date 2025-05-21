@@ -64,8 +64,6 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 1024):
         tensor_parallel_size=1,
         dtype="bfloat16",
         streaming=True, # Enabled streaming
-        # Consider adding a request_timeout if needed for long generations
-        # request_timeout=3600, # Example: 1 hour
     )
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.chat_template is None:
@@ -119,7 +117,7 @@ def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instanc
 
 # ------------------------------ gradio callbacks --------------------------
 def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
-    global LLM, TOKENIZER, SYSTEM_PROMPT # Access globals
+    global LLM, TOKENIZER, SYSTEM_PROMPT
     if pdf_file_obj is None:
         raise gr.Error("Please upload a PDF first.")
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
@@ -136,17 +134,19 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     return initial_ui_message, state
 
 def answer(msg: str, state: Dict[str, Any]):
+    if not msg.strip(): # Prevent empty messages
+        yield state.get("ui_messages", []), state
+        return
+
     if "chain" not in state or not state["chain"]:
         raise gr.Error("PDF not processed or chain not initialized. Please upload a PDF first.")
 
-    ui_messages = state.get("ui_messages", [])
-    langchain_history = state.get("langchain_history", [])
+    ui_messages = state.get("ui_messages", []).copy() # Use a copy to avoid modifying state directly during iteration
+    langchain_history = state.get("langchain_history", []).copy()
 
-    # Add user's message to UI immediately
     ui_messages.append({"role": "user", "content": msg})
     yield ui_messages, state # Update UI to show user's message
 
-    # Prepare for assistant's response (placeholder)
     ui_messages.append({"role": "assistant", "content": ""})
     current_assistant_response = ""
 
@@ -156,27 +156,23 @@ def answer(msg: str, state: Dict[str, Any]):
                 token = chunk["answer"]
                 current_assistant_response += token
                 ui_messages[-1]["content"] = current_assistant_response
-                yield ui_messages, state # Stream update to UI
+                yield ui_messages, state
     except Exception as e:
         print(f"Error during LLM streaming: {e}")
         ui_messages[-1]["content"] = "Sorry, an error occurred while generating the response."
-        # Fallback: you might want to add this error to langchain_history as well if appropriate
-        # langchain_history.append((msg, ui_messages[-1]["content"]))
+        # Update state with the error message for UI consistency
         state["ui_messages"] = ui_messages
-        # state["langchain_history"] = langchain_history # If you decide to save error interaction
         yield ui_messages, state
-        return # Stop generation here
+        return
 
-    # Finalize: Add watermark and update histories
     final_response_with_watermark = current_assistant_response + WATERMARK
-    ui_messages[-1]["content"] = final_response_with_watermark # Update UI with watermark
+    ui_messages[-1]["content"] = final_response_with_watermark
 
-    langchain_history.append((msg, final_response_with_watermark))
-
+    # Update actual state that persists
+    state["langchain_history"].append((msg, current_assistant_response)) # Store raw response before watermark for history
     state["ui_messages"] = ui_messages
-    state["langchain_history"] = langchain_history
 
-    yield ui_messages, state # Final update to UI
+    yield ui_messages, state
 
 def reset_session(state: Dict[str, Any]):
     initial_ui_messages = [{"role": "system", "content": "Session reset. Please upload a PDF to begin."}]
@@ -187,15 +183,14 @@ def reset_session(state: Dict[str, Any]):
 
 # ------------------------------ UI ----------------------------------------
 def build_ui(port: int):
-    global MODEL_ID # Access global MODEL_ID for display
+    global MODEL_ID
     with gr.Blocks(css="body {font-family: 'Inter', sans-serif;}") as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}: Neuro-Pathology Q-A")
 
-        # Initialize state with empty histories
         app_state = gr.State({
             "chain": None,
             "langchain_history": [],
-            "ui_messages": [{"role": "system", "content": "Please upload a PDF to begin."}] # Initial message
+            "ui_messages": [{"role": "system", "content": "Please upload a PDF to begin."}]
         })
 
         with gr.Row():
@@ -203,24 +198,37 @@ def build_ui(port: int):
             reset_btn = gr.Button("Reset Chat & PDF")
 
         chat = gr.Chatbot(
-            value=[{"role": "system", "content": "Please upload a PDF to begin."}], # Initial display
+            value=[{"role": "system", "content": "Please upload a PDF to begin."}],
             label=f"{AGENT_NAME} Chat",
             height=480,
-            bubble_full_width=False,
+            # bubble_full_width=False, # Deprecated, remove
             show_copy_button=True,
-            layout="panel"
+            layout="panel",
+            type="messages"  # <--- THIS IS THE FIX
         )
-        box  = gr.Textbox(lines=1, placeholder="Type your question and press Enter…", label="Your Question")
+        box  = gr.Textbox(lines=1, placeholder="Type your question and press Enter…", label="Your Question", scale=7) # Added scale
 
         pdf_file.change(upload_pdf, inputs=[pdf_file, app_state], outputs=[chat, app_state])
-
         reset_btn.click(reset_session, inputs=[app_state], outputs=[chat, app_state])
 
-        # Handle message submission
-        # The `answer` generator will yield updates to chat and app_state
-        box.submit(answer, inputs=[box, app_state], outputs=[chat, app_state])
-        # Clear textbox after submit (chained event)
-        box.submit(lambda: "", inputs=None, outputs=[box], queue=False)
+        # Add a hidden button to trigger clearing textbox, or handle within submit
+        # Using a combined approach for submit
+        def submit_and_clear(msg: str, current_state: Dict[str, Any]):
+            # This function will first call the answer generator
+            # and then return an empty string for the textbox.
+            # Gradio handles multiple output components from a single event.
+            # However, since `answer` is a generator, we need to handle this carefully.
+            # The primary `submit` will handle `answer`.
+            # A separate `submit` with `js` or a chained `then` (if Gradio supports it well for generators)
+            # is better for clearing the box *after* processing.
+            # For simplicity, the `lambda: ""` on a separate submit is often the easiest.
+            pass # This function is more of a conceptual placeholder for chained actions
+
+        # Main submit action for the generator
+        box.submit(fn=answer, inputs=[box, app_state], outputs=[chat, app_state])
+        # Secondary action to clear the textbox after submission
+        # This runs after the Python `submit` function for `answer` has started.
+        box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False)
 
 
         gr.Markdown(f"<small>Device: **{_device()}** | LLM: **{MODEL_ID}**</small>")

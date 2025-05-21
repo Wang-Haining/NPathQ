@@ -37,6 +37,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
 from langchain_community.vectorstores import FAISS
+from langchain_core.prompts import StringPromptTemplate
 from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
@@ -88,25 +89,35 @@ def vector_store(text: str):
     return FAISS.from_documents(chunks, embed)
 
 
-def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
-    def prompt_func(context, question):
+class ChatTemplatePrompt(StringPromptTemplate):
+    """Wrap HF tokenizer.chat_template so LangChain can inject vars."""
+
+    # two variables the chain will pass
+    input_variables = ["context", "question"]
+
+    def __init__(self, system_prompt: str, tokenizer):
+        super().__init__()
+        self.system_prompt = system_prompt
+        self.tokenizer = tokenizer
+
+    def format(self, **kwargs) -> str:
+        ctx   = kwargs["context"]
+        query = kwargs["question"]
+
         messages = [
-            {"role": "system", "content": system_prompt_content},
-            {
-                "role": "user",
-                "content": f"Based on the following context:\n\n{context}\n\nAnswer this question:\n{question}",
-            },
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user",
+             "content": f"Based on the following context:\n\n{ctx}\n\n"
+                        f"Answer this question:\n{query}"}
         ]
-        return tokenizer_instance.apply_chat_template(
+        # render to final prompt string using HF template
+        return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
 
-    prompt = PromptTemplate(
-        input_variables=["context", "question"],
-        template="",
-        template_format="jinja2",
-    )
-    prompt.format = prompt_func
+
+def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
+    prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
     return ConversationalRetrievalChain.from_llm(
         llm=llm_instance,

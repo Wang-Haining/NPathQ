@@ -19,27 +19,14 @@ Workflow
 4. Chunks are stored in a local FAISS index.
 5. A `ConversationalRetrievalChain` feeds the most relevant chunks plus the
    **system prompt** (loaded from *system_prompt.md*) into your chosen LLM.
+   The LLM call uses the model's specific chat template via its Hugging Face tokenizer.
    Earlier turns are appended for on‑session memory until the PDF changes.
 6. Answers stream to the chat UI, each suffixed with a laboratory watermark.
-
-CLI Usage
----------
-```bash
-# default llama 3.1 8B
-python pdf_qa_app.py
-
-# pick another model & prompt
-python pdf_qa_app.py --model mistralai/Mistral-7B-Instruct-v0.3 \
-                    --prompt custom_prompt.md
-
-# override port or expose in docker-compose
-python pdf_qa_app.py --port 8501
-```
 """
 
 import argparse
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
 import gradio as gr
 import torch
@@ -50,6 +37,7 @@ from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.chains import ConversationalRetrievalChain
+from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
 WATERMARK = (
@@ -57,22 +45,35 @@ WATERMARK = (
     "Lab, IU School of Medicine. Contact hw56@iu.edu for assistance."
 )
 
+# Global variables for LLM and Tokenizer (initialized in main)
+LLM = None
+TOKENIZER = None
+SYSTEM_PROMPT = None
+MODEL_ID = None
+
+
 # ------------------------------ helpers -----------------------------------
 def _device() -> str:
     return "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0" if torch.cuda.is_available() else "cpu"
 
-def load_llm(model_id: str, max_new: int = 1024):
-    return VLLM(
+def load_llm_and_tokenizer(model_id: str, max_new: int = 1024):
+    llm = VLLM(
         model=model_id,
         max_new_tokens=max_new,
         trust_remote_code=True,
         tensor_parallel_size=1,
         dtype="bfloat16",
-        streaming=False,          # ← streaming off for stability
+        streaming=True, # Enabled streaming
+        # Consider adding a request_timeout if needed for long generations
+        # request_timeout=3600, # Example: 1 hour
     )
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    if tokenizer.chat_template is None:
+        print(f"Warning: Tokenizer for {model_id} does not have a chat_template defined. Defaulting to basic concatenation which might be suboptimal.")
+    return llm, tokenizer
 
-def pdf_to_text(pdf: Path) -> str:
-    return DocumentConverter().convert(str(pdf)).document.export_to_text()
+def pdf_to_text(pdf_path: Path) -> str:
+    return DocumentConverter().convert(str(pdf_path)).document.export_to_text()
 
 def vector_store(text: str):
     chunks = RecursiveCharacterTextSplitter(
@@ -87,74 +88,174 @@ def vector_store(text: str):
     return FAISS.from_documents(chunks, embed)
 
 
-def qa_chain(vstore, system_prompt: str):
-    prompt = PromptTemplate(
-        input_variables=["context", "question"],
-        template=f"{system_prompt}\n\n{{context}}\n\nUser question: {{question}}\nAnswer:",
+def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
+    messages_for_template = [
+        {"role": "system", "content": system_prompt_content},
+        {"role": "user", "content": "Based on the following context:\n\n{context}\n\nAnswer this question:\n{question}"}
+    ]
+
+    try:
+        prompt_template_str = tokenizer_instance.apply_chat_template(
+            messages_for_template,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+    except Exception as e:
+        print(f"Error applying chat template: {e}. Falling back to basic prompt string.")
+        prompt_template_str = f"{system_prompt_content}\n\nContext:\n{{context}}\n\nQuestion:\n{{question}}\n\nAnswer:"
+
+    final_prompt = PromptTemplate(
+        template=prompt_template_str,
+        input_variables=["context", "question"]
     )
-    return ConversationalRetrievalChain.from_llm(
-        llm=LLM,
+
+    chain = ConversationalRetrievalChain.from_llm(
+        llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
-        combine_docs_chain_kwargs={"prompt": prompt}
+        combine_docs_chain_kwargs={"prompt": final_prompt},
+        return_source_documents=False
     )
+    return chain
 
 # ------------------------------ gradio callbacks --------------------------
-def upload_pdf(pdf: gr.File, state: dict):
-    if pdf is None:
+def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
+    global LLM, TOKENIZER, SYSTEM_PROMPT # Access globals
+    if pdf_file_obj is None:
         raise gr.Error("Please upload a PDF first.")
-    txt = pdf_to_text(Path(str(pdf)))
-    state["chain"] = qa_chain(vector_store(txt), SYSTEM_PROMPT)
-    state["history"] = []
-    return [{"role": "system", "content": "PDF parsed. Ask away!"}], state
+    if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
+        raise gr.Error("LLM, Tokenizer, or System Prompt not initialized. Please restart.")
 
-def answer(msg: str, state: dict):
-    if "chain" not in state:
-        raise gr.Error("Upload a PDF first.")
+    txt = pdf_to_text(Path(pdf_file_obj.name))
+    vstore = vector_store(txt)
 
-    hist: List[Tuple[str, str]] = state.get("history", [])
-    resp = state["chain"].invoke({"question": msg, "chat_history": hist})["answer"]
-    hist.append((msg, resp + WATERMARK))
-    state["history"] = hist
+    state["chain"] = qa_chain(vstore, SYSTEM_PROMPT, LLM, TOKENIZER)
+    state["langchain_history"] = []
+    initial_ui_message = [{"role": "system", "content": "PDF parsed. Ask away!"}]
+    state["ui_messages"] = initial_ui_message
 
-    messages = []
-    for q, a in hist:
-        messages.append({"role": "user", "content": q})
-        messages.append({"role": "assistant", "content": a})
+    return initial_ui_message, state
 
-    return messages, state
+def answer(msg: str, state: Dict[str, Any]):
+    if "chain" not in state or not state["chain"]:
+        raise gr.Error("PDF not processed or chain not initialized. Please upload a PDF first.")
 
+    ui_messages = state.get("ui_messages", [])
+    langchain_history = state.get("langchain_history", [])
+
+    # Add user's message to UI immediately
+    ui_messages.append({"role": "user", "content": msg})
+    yield ui_messages, state # Update UI to show user's message
+
+    # Prepare for assistant's response (placeholder)
+    ui_messages.append({"role": "assistant", "content": ""})
+    current_assistant_response = ""
+
+    try:
+        for chunk in state["chain"].stream({"question": msg, "chat_history": langchain_history}):
+            if "answer" in chunk:
+                token = chunk["answer"]
+                current_assistant_response += token
+                ui_messages[-1]["content"] = current_assistant_response
+                yield ui_messages, state # Stream update to UI
+    except Exception as e:
+        print(f"Error during LLM streaming: {e}")
+        ui_messages[-1]["content"] = "Sorry, an error occurred while generating the response."
+        # Fallback: you might want to add this error to langchain_history as well if appropriate
+        # langchain_history.append((msg, ui_messages[-1]["content"]))
+        state["ui_messages"] = ui_messages
+        # state["langchain_history"] = langchain_history # If you decide to save error interaction
+        yield ui_messages, state
+        return # Stop generation here
+
+    # Finalize: Add watermark and update histories
+    final_response_with_watermark = current_assistant_response + WATERMARK
+    ui_messages[-1]["content"] = final_response_with_watermark # Update UI with watermark
+
+    langchain_history.append((msg, final_response_with_watermark))
+
+    state["ui_messages"] = ui_messages
+    state["langchain_history"] = langchain_history
+
+    yield ui_messages, state # Final update to UI
+
+def reset_session(state: Dict[str, Any]):
+    initial_ui_messages = [{"role": "system", "content": "Session reset. Please upload a PDF to begin."}]
+    state["chain"] = None
+    state["langchain_history"] = []
+    state["ui_messages"] = initial_ui_messages
+    return initial_ui_messages, state
 
 # ------------------------------ UI ----------------------------------------
 def build_ui(port: int):
+    global MODEL_ID # Access global MODEL_ID for display
     with gr.Blocks(css="body {font-family: 'Inter', sans-serif;}") as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}: Neuro-Pathology Q-A")
-        state = gr.State({})
+
+        # Initialize state with empty histories
+        app_state = gr.State({
+            "chain": None,
+            "langchain_history": [],
+            "ui_messages": [{"role": "system", "content": "Please upload a PDF to begin."}] # Initial message
+        })
 
         with gr.Row():
             pdf_file = gr.File(label="Upload PDF", file_types=[".pdf"])
-            reset_btn = gr.Button("Reset session")
+            reset_btn = gr.Button("Reset Chat & PDF")
 
-        chat = gr.Chatbot(height=480, type="messages")
-        box  = gr.Textbox(lines=1, placeholder="Type your question…")
+        chat = gr.Chatbot(
+            value=[{"role": "system", "content": "Please upload a PDF to begin."}], # Initial display
+            label=f"{AGENT_NAME} Chat",
+            height=480,
+            bubble_full_width=False,
+            show_copy_button=True,
+            layout="panel"
+        )
+        box  = gr.Textbox(lines=1, placeholder="Type your question and press Enter…", label="Your Question")
 
-        pdf_file.change(upload_pdf, [pdf_file, state], [chat, state])
-        reset_btn.click(lambda: ([], {}), None, [chat, state])
-        box.submit(answer, [box, state], [chat, state])
+        pdf_file.change(upload_pdf, inputs=[pdf_file, app_state], outputs=[chat, app_state])
 
-        gr.Markdown(f"<small>device **{_device()}** | model **{MODEL_ID}**</small>")
+        reset_btn.click(reset_session, inputs=[app_state], outputs=[chat, app_state])
 
+        # Handle message submission
+        # The `answer` generator will yield updates to chat and app_state
+        box.submit(answer, inputs=[box, app_state], outputs=[chat, app_state])
+        # Clear textbox after submit (chained event)
+        box.submit(lambda: "", inputs=None, outputs=[box], queue=False)
+
+
+        gr.Markdown(f"<small>Device: **{_device()}** | LLM: **{MODEL_ID}**</small>")
+
+    print(f"Starting {AGENT_NAME} on http://0.0.0.0:{port}")
     demo.launch(server_name="0.0.0.0", server_port=port, share=False)
 
 # ------------------------------ main --------------------------------------
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--model", default="meta-llama/Meta-Llama-3.1-8B-Instruct")
-    p.add_argument("--prompt", default="system_prompt.md")
-    p.add_argument("--port", type=int, default=7860)
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description=f"{AGENT_NAME}: PDF QA with Local LLMs")
+    parser.add_argument("--model", default="meta-llama/Meta-Llama-3.1-8B-Instruct", help="Hugging Face model ID for the LLM.")
+    parser.add_argument("--prompt", default="system_prompt.md", help="Path to the system prompt Markdown file.")
+    parser.add_argument("--port", type=int, default=7860, help="Port to run the Gradio app on.")
+    parser.add_argument("--max_new_tokens", type=int, default=1024, help="Max new tokens for LLM generation.")
+    args = parser.parse_args()
 
     MODEL_ID = args.model
-    SYSTEM_PROMPT = Path(args.prompt).read_text().strip()
-    LLM = load_llm(MODEL_ID)
+
+    system_prompt_path = Path(args.prompt)
+    if not system_prompt_path.exists():
+        print(f"Error: System prompt file not found at {system_prompt_path}")
+        default_prompt_content = "You are a helpful AI assistant specialized in answering questions about neuropathology reports. Use the provided context from the report to answer accurately and concisely. If the information is not in the context, say you don't know."
+        try:
+            with open(system_prompt_path, "w") as f:
+                f.write(default_prompt_content)
+            print(f"Created a default system prompt at: {system_prompt_path}")
+            SYSTEM_PROMPT = default_prompt_content
+        except Exception as e:
+            print(f"Could not create default system prompt: {e}. Exiting.")
+            exit(1)
+    else:
+        SYSTEM_PROMPT = system_prompt_path.read_text().strip()
+
+    print(f"Loading LLM ({MODEL_ID}) and Tokenizer...")
+    LLM, TOKENIZER = load_llm_and_tokenizer(MODEL_ID, max_new=args.max_new_tokens)
+    print("LLM and Tokenizer loaded.")
 
     build_ui(args.port)

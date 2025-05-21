@@ -89,49 +89,31 @@ def vector_store(text: str):
 
 
 def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
-    messages_for_template = [
-        {"role": "system", "content": system_prompt_content},
-        {
-            "role": "user",
-            "content": "Based on the following context:\n\n{context}\n\nAnswer this question:\n{question}",
-        },
-    ]
-
-    prompt_template_str = ""
-    try:
-        if tokenizer_instance.chat_template:
-            prompt_template_str = tokenizer_instance.apply_chat_template(
-                messages_for_template, tokenize=False, add_generation_prompt=True
-            )
-            print("\n---- DEBUG: Applied Chat Template (for combine_docs_chain) ----")
-            print(prompt_template_str)
-            print("-------------------------------------------------------------\n")
-        else:
-            print(
-                "WARNING: No chat_template found on tokenizer. Using basic fallback prompt format."
-            )
-            prompt_template_str = f"{system_prompt_content}\n\nContext:\n{{context}}\n\nQuestion:\n{{question}}\n\nAnswer:"
-
-    except Exception as e:
-        print(
-            f"ERROR applying chat template: {e}. Falling back to basic prompt string."
+    def prompt_func(context, question):
+        messages = [
+            {"role": "system", "content": system_prompt_content},
+            {
+                "role": "user",
+                "content": f"Based on the following context:\n\n{context}\n\nAnswer this question:\n{question}",
+            },
+        ]
+        return tokenizer_instance.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
         )
-        prompt_template_str = f"{system_prompt_content}\n\nContext:\n{{context}}\n\nQuestion:\n{{question}}\n\nAnswer:"
-        print("\n---- DEBUG: Fallback Prompt Template (for combine_docs_chain) ----")
-        print(prompt_template_str)
-        print("-------------------------------------------------------------\n")
 
-    final_prompt = PromptTemplate(
-        template=prompt_template_str, input_variables=["context", "question"]
+    prompt = PromptTemplate(
+        input_variables=["context", "question"],
+        template="",
+        template_format="jinja2",
     )
+    prompt.format = prompt_func
 
-    chain = ConversationalRetrievalChain.from_llm(
+    return ConversationalRetrievalChain.from_llm(
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
-        combine_docs_chain_kwargs={"prompt": final_prompt},
+        combine_docs_chain_kwargs={"prompt": prompt},
         return_source_documents=False,
     )
-    return chain
 
 
 def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
@@ -140,9 +122,12 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
         raise gr.Error("Please upload a PDF first.")
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
         missing = []
-        if LLM is None: missing.append("LLM")
-        if TOKENIZER is None: missing.append("Tokenizer")
-        if SYSTEM_PROMPT is None: missing.append("System Prompt")
+        if LLM is None:
+            missing.append("LLM")
+        if TOKENIZER is None:
+            missing.append("Tokenizer")
+        if SYSTEM_PROMPT is None:
+            missing.append("System Prompt")
         raise gr.Error(
             f"{', '.join(missing)} not initialized. Please ensure system_prompt.md exists and restart the application."
         )
@@ -296,7 +281,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--prompt",
-        default="system_prompt.md", # This argument specifies the file name
+        default="system_prompt.md",  # This argument specifies the file name
         help="Path to the system prompt Markdown file. This file MUST exist.",
     )
     parser.add_argument(
@@ -315,12 +300,14 @@ if __name__ == "__main__":
     system_prompt_path = Path(args.prompt)
     if not system_prompt_path.exists():
         print(f"ERROR: System prompt file '{system_prompt_path}' not found.")
-        print("Please create this file with your desired system prompt or check the path.")
-        exit(1) # exit if the file is not found
+        print(
+            "Please create this file with your desired system prompt or check the path."
+        )
+        exit(1)  # exit if the file is not found
 
     try:
         SYSTEM_PROMPT = system_prompt_path.read_text().strip()
-        if not SYSTEM_PROMPT: # check if the file is empty
+        if not SYSTEM_PROMPT:  # check if the file is empty
             print(f"ERROR: System prompt file '{system_prompt_path}' is empty.")
             print("Please ensure the file contains a valid system prompt.")
             exit(1)
@@ -336,9 +323,14 @@ if __name__ == "__main__":
     # final check, though the exit(1) calls above should prevent reaching here if there's an issue
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
         missing_init = []
-        if LLM is None: missing_init.append("LLM")
-        if TOKENIZER is None: missing_init.append("Tokenizer")
-        if SYSTEM_PROMPT is None: missing_init.append("SYSTEM_PROMPT text")
-        raise RuntimeError(f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting.")
+        if LLM is None:
+            missing_init.append("LLM")
+        if TOKENIZER is None:
+            missing_init.append("Tokenizer")
+        if SYSTEM_PROMPT is None:
+            missing_init.append("SYSTEM_PROMPT text")
+        raise RuntimeError(
+            f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting."
+        )
 
     build_ui(args.port)

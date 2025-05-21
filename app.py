@@ -37,9 +37,9 @@ python pdf_qa_app.py --port 8501
 ```
 """
 
-import argparse, os
+import argparse
 from pathlib import Path
-from typing import Generator, List, Tuple
+from typing import List, Tuple
 
 import gradio as gr
 import torch
@@ -57,92 +57,83 @@ WATERMARK = (
     "Lab, IU School of Medicine. Contact hw56@iu.edu for assistance."
 )
 
-# ------------------------------------------------------------------ helpers
+# ------------------------------ helpers -----------------------------------
 def _device() -> str:
     return "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0" if torch.cuda.is_available() else "cpu"
 
-def load_llm(model_id: str, max_new_tokens: int = 1024):
+def load_llm(model_id: str, max_new: int = 1024):
     return VLLM(
         model=model_id,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=max_new,
         trust_remote_code=True,
         tensor_parallel_size=1,
         dtype="bfloat16",
-        streaming=True,
+        streaming=False,          # ← streaming off for stability
     )
 
-def load_system_prompt(path: Path) -> str:
-    return path.read_text().strip()
-
 def pdf_to_text(pdf: Path) -> str:
-    txt = DocumentConverter().convert(str(pdf)).document.export_to_text()
-    return txt
+    return DocumentConverter().convert(str(pdf)).document.export_to_text()
 
-def make_vector_store(text: str):
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=100).create_documents([text])
-    embedder = HuggingFaceEmbeddings("sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"device": _device()})
-    return FAISS.from_documents(chunks, embedder)
+def vector_store(text: str):
+    chunks = RecursiveCharacterTextSplitter(1024, 100).create_documents([text])
+    embed = HuggingFaceEmbeddings("sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"device": _device()})
+    return FAISS.from_documents(chunks, embed)
 
-def make_chain(vstore: FAISS, system_prompt: str):
-    retriever = vstore.as_retriever(search_kwargs={"k": 4})
+def qa_chain(vstore, system_prompt: str):
     prompt = PromptTemplate(
         input_variables=["context", "question"],
         template=f"{system_prompt}\n\n{{context}}\n\nUser question: {{question}}\nAnswer:",
     )
     return ConversationalRetrievalChain.from_llm(
-        llm=LLM,  # global singleton
-        retriever=retriever,
+        llm=LLM,
+        retriever=vstore.as_retriever(search_kwargs={"k": 4}),
         return_source_documents=False,
         chain_type_kwargs={"prompt": prompt},
     )
 
-# ------------------------------------------------------------------ gradio callbacks
-def upload_pdf(pdf_file: gr.File, state: dict):
-    if pdf_file is None:
-        raise gr.Error("please upload a pdf first.")
-    text = pdf_to_text(Path(pdf_file.name))
-    state["chain"] = make_chain(make_vector_store(text), SYSTEM_PROMPT)
+# ------------------------------ gradio callbacks --------------------------
+def upload_pdf(pdf: gr.File, state: dict):
+    if pdf is None:
+        raise gr.Error("Please upload a PDF first.")
+    txt = pdf_to_text(Path(pdf.name))
+    state["chain"] = qa_chain(vector_store(txt), SYSTEM_PROMPT)
     state["history"] = []
-    return [["system", "PDF parsed. Ask away!"]], state
+    return [{"role": "system", "content": "PDF parsed. Ask away!"}], state
 
-def answer_question(message: str, state: dict) -> Generator:
+def answer(msg: str, state: dict):
     if "chain" not in state:
-        raise gr.Error("upload a pdf first.")
-    history: List[Tuple[str, str]] = state.get("history", [])
+        raise gr.Error("Upload a PDF first.")
+    hist: List[Tuple[str, str]] = state.get("history", [])
     chain = state["chain"]
+    resp = chain({"question": msg, "chat_history": hist})["answer"] + WATERMARK
+    hist.append((msg, resp))
+    state["history"] = hist
+    messages = [{"role": "user", "content": q} if i % 2 == 0 else {"role": "assistant", "content": a}
+                for i, (q, a) in enumerate(sum(([m] for m in hist), []))]
+    return messages, state
 
-    # LangChain streaming generator
-    for chunk in chain.stream({"question": message, "chat_history": history}):
-        partial = chunk["answer"]
-        yield [[q, a] for q, a in history] + [[message, partial + "▌"]], state
-
-    full_answer = chunk["answer"] + WATERMARK
-    history.append((message, full_answer))
-    state["history"] = history
-    yield [[q, a] for q, a in history], state
-
-# ------------------------------------------------------------------ UI
+# ------------------------------ UI ----------------------------------------
 def build_ui(port: int):
     with gr.Blocks(css="body {font-family: 'Inter', sans-serif;}") as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}: Neuro-Pathology Q-A")
-        # state stores only lightweight python objects
-        state = gr.State({"history": []})
+        state = gr.State({})
 
         with gr.Row():
-            pdf_input = gr.File(label="Upload PDF", file_types=[".pdf"], interactive=True)
+            pdf_file = gr.File(label="Upload PDF", file_types=[".pdf"])
             reset_btn = gr.Button("Reset session")
 
-        chat = gr.Chatbot(height=480)
-        inp = gr.Textbox(lines=1, placeholder="Type your question…")
+        chat = gr.Chatbot(height=480, type="messages")
+        box  = gr.Textbox(lines=1, placeholder="Type your question…")
 
-        pdf_input.change(upload_pdf, [pdf_input, state], [chat, state])
-        reset_btn.click(lambda: ([], {"history": []}), None, [chat, state])
-        inp.submit(answer_question, [inp, state], [chat, state], stream=True)
+        pdf_file.change(upload_pdf, [pdf_file, state], [chat, state])
+        reset_btn.click(lambda: ([], {}), None, [chat, state])
+        box.submit(answer, [box, state], [chat, state])
 
-        gr.Markdown(f"<small>running on **{_device()}** | model: **{MODEL_ID}**</small>")
+        gr.Markdown(f"<small>device **{_device()}** | model **{MODEL_ID}**</small>")
+
     demo.launch(server_name="0.0.0.0", server_port=port, share=False)
 
-# ------------------------------------------------------------------ main
+# ------------------------------ main --------------------------------------
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="meta-llama/Meta-Llama-3.1-8B-Instruct")
@@ -151,7 +142,7 @@ if __name__ == "__main__":
     args = p.parse_args()
 
     MODEL_ID = args.model
-    SYSTEM_PROMPT = load_system_prompt(Path(args.prompt))
-    LLM = load_llm(MODEL_ID)  # singleton, kept outside gr.State
+    SYSTEM_PROMPT = Path(args.prompt).read_text().strip()
+    LLM = load_llm(MODEL_ID)
 
     build_ui(args.port)

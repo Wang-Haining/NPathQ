@@ -75,10 +75,17 @@ def pdf_to_text(pdf: Path) -> str:
     return DocumentConverter().convert(str(pdf)).document.export_to_text()
 
 def vector_store(text: str):
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1024,
-                                            chunk_overlap=100).create_documents([text])
-    embed = HuggingFaceEmbeddings("sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"device": _device()})
+    chunks = RecursiveCharacterTextSplitter(
+        chunk_size=1024,
+        chunk_overlap=100
+    ).create_documents([text])
+
+    embed = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": _device()},
+    )
     return FAISS.from_documents(chunks, embed)
+
 
 def qa_chain(vstore, system_prompt: str):
     prompt = PromptTemplate(

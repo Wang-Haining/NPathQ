@@ -95,7 +95,7 @@ def qa_chain(vstore, system_prompt: str):
 def upload_pdf(pdf: gr.File, state: dict):
     if pdf is None:
         raise gr.Error("Please upload a PDF first.")
-    txt = pdf_to_text(Path(pdf.name))
+    txt = pdf_to_text(Path(pdf))
     state["chain"] = qa_chain(vector_store(txt), SYSTEM_PROMPT)
     state["history"] = []
     return [{"role": "system", "content": "PDF parsed. Ask away!"}], state

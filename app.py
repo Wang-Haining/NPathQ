@@ -95,8 +95,7 @@ def qa_chain(vstore, system_prompt: str):
     return ConversationalRetrievalChain.from_llm(
         llm=LLM,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
-        return_source_documents=False,
-        chain_type_kwargs={"prompt": prompt},
+        combine_docs_chain_kwargs={"prompt": prompt}
     )
 
 # ------------------------------ gradio callbacks --------------------------

@@ -39,9 +39,8 @@ from langchain_community.vectorstores import FAISS
 from langchain.chains import ConversationalRetrievalChain
 from transformers import AutoTokenizer
 
-AGENT_NAME = "NPathQ" # Used for title and messages
+AGENT_NAME = "NPathQ"
 
-# Global variables for LLM and Tokenizer (initialized in main)
 LLM = None
 TOKENIZER = None
 SYSTEM_PROMPT = None
@@ -160,7 +159,6 @@ def answer(msg: str, state: Dict[str, Any]):
         yield ui_messages, state
         return
 
-    # Watermark is removed from here. It's now a static footer.
     ui_messages[-1]["content"] = current_assistant_response
 
     state["langchain_history"].append((msg, current_assistant_response))
@@ -245,8 +243,8 @@ body {font-family: 'Inter', sans-serif;}
 """
 
 FOOTER_TEXT = (
-    f"This tool is {AGENT_NAME}, an agent from Haining Wang@Su's Lab, "
-    "Department of Biostatistics and Health Data Science, IU School of Medicine. "
+    f"Brought to you by Haining Wang@Su's Lab, "
+    "Department of Biostatistics & Health Data Science, IU School of Medicine. "
     "Contact <a href='mailto:hw56@iu.edu'>hw56@iu.edu</a> for assistance."
 )
 

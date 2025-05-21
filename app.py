@@ -35,21 +35,14 @@ python pdf_qa_app.py --model mistralai/Mistral-7B-Instruct-v0.3 \
 # override port or expose in docker-compose
 python pdf_qa_app.py --port 8501
 ```
-
-Dependencies
-------------
-* gradio >= 4.28 · langchain >= 0.2 · transformers >= 4.41 · accelerate >= 0.30
-* sentence‑transformers · faiss‑cpu (or faiss‑gpu) · docling‑project · vllm
 """
 
-import argparse
-import os
+import argparse, os
 from pathlib import Path
-from typing import List, Tuple
+from typing import Generator, List, Tuple
 
 import gradio as gr
 import torch
-from langchain.docstore.document import Document
 from docling.document_converter import DocumentConverter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
@@ -64,148 +57,101 @@ WATERMARK = (
     "Lab, IU School of Medicine. Contact hw56@iu.edu for assistance."
 )
 
-# ---------------------------------------------------------------------------
-# device & model helpers
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------ helpers
+def _device() -> str:
+    return "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0" if torch.cuda.is_available() else "cpu"
 
-def _select_device() -> str:
-    if torch.cuda.is_available():
-        return "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
-    return "cpu"
-
-
-def load_llm(model_name: str, max_new_tokens: int = 10240):
+def load_llm(model_id: str, max_new_tokens: int = 1024):
     return VLLM(
-        model=model_name,
+        model=model_id,
         max_new_tokens=max_new_tokens,
         trust_remote_code=True,
         tensor_parallel_size=1,
         dtype="bfloat16",
-        streaming=True
+        streaming=True,
     )
-
-# ---------------------------------------------------------------------------
-# system prompt handling
-# ---------------------------------------------------------------------------
 
 def load_system_prompt(path: Path) -> str:
-    if not path.exists():
-        raise FileNotFoundError(f"system prompt file not found: {path}")
-    return path.read_text(encoding="utf-8").strip()
+    return path.read_text().strip()
 
-# ---------------------------------------------------------------------------
-# document handling
-# ---------------------------------------------------------------------------
+def pdf_to_text(pdf: Path) -> str:
+    txt = DocumentConverter().convert(str(pdf)).document.export_to_text()
+    return txt
 
-def parse_pdf_to_text(pdf_path: Path) -> str:
-    converter = DocumentConverter()
-    result = converter.convert(str(pdf_path))
-    return result.document.export_to_text()
+def make_vector_store(text: str):
+    chunks = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=100).create_documents([text])
+    embedder = HuggingFaceEmbeddings("sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"device": _device()})
+    return FAISS.from_documents(chunks, embedder)
 
-
-def build_vector_store(text: str):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=100)
-    docs = splitter.create_documents([text])
-    embedder = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": _select_device()},
-    )
-    return FAISS.from_documents(docs, embedder)
-
-
-def build_qa_chain(vstore: FAISS, llm, system_prompt: str):
-    retriever = vstore.as_retriever(search_type="similarity", search_kwargs={"k": 4})
+def make_chain(vstore: FAISS, system_prompt: str):
+    retriever = vstore.as_retriever(search_kwargs={"k": 4})
     prompt = PromptTemplate(
         input_variables=["context", "question"],
         template=f"{system_prompt}\n\n{{context}}\n\nUser question: {{question}}\nAnswer:",
     )
     return ConversationalRetrievalChain.from_llm(
-        llm=llm,
+        llm=LLM,  # global singleton
         retriever=retriever,
         return_source_documents=False,
         chain_type_kwargs={"prompt": prompt},
     )
 
-# ---------------------------------------------------------------------------
-# gradio callbacks
-# ---------------------------------------------------------------------------
-
+# ------------------------------------------------------------------ gradio callbacks
 def upload_pdf(pdf_file: gr.File, state: dict):
     if pdf_file is None:
         raise gr.Error("please upload a pdf first.")
-
-    text = parse_pdf_to_text(Path(pdf_file.name))
-    vstore = build_vector_store(text)
-    state["chain"] = build_qa_chain(vstore, state["llm"], state["system_prompt"])
+    text = pdf_to_text(Path(pdf_file.name))
+    state["chain"] = make_chain(make_vector_store(text), SYSTEM_PROMPT)
     state["history"] = []
+    return [["system", "PDF parsed. Ask away!"]], state
 
-    return (
-        [["system", "PDF parsed. Ask away!"]],
-        state,
-    )
-
-
-def answer_question(message: str, state: dict):
+def answer_question(message: str, state: dict) -> Generator:
     if "chain" not in state:
         raise gr.Error("upload a pdf first.")
-
-    chat_history: List[Tuple[str, str]] = state.get("history", [])
+    history: List[Tuple[str, str]] = state.get("history", [])
     chain = state["chain"]
-    result = chain({"question": message, "chat_history": chat_history})
-    answer = result["answer"] + WATERMARK
-    chat_history.append((message, answer))
-    state["history"] = chat_history
-    return [[q, a] for q, a in chat_history], state
 
-# ---------------------------------------------------------------------------
-# ui construction
-# ---------------------------------------------------------------------------
+    # LangChain streaming generator
+    for chunk in chain.stream({"question": message, "chat_history": history}):
+        partial = chunk["answer"]
+        yield [[q, a] for q, a in history] + [[message, partial + "▌"]], state
 
-def build_ui(model_name: str, prompt_path: Path):
-    system_prompt = load_system_prompt(prompt_path)
+    full_answer = chunk["answer"] + WATERMARK
+    history.append((message, full_answer))
+    state["history"] = history
+    yield [[q, a] for q, a in history], state
+
+# ------------------------------------------------------------------ UI
+def build_ui(port: int):
     with gr.Blocks(css="body {font-family: 'Inter', sans-serif;}") as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}: Neuro-Pathology Q-A")
-        state = gr.State({
-            "llm": load_llm(model_name),
-            "system_prompt": system_prompt,
-        })
+        # state stores only lightweight python objects
+        state = gr.State({"history": []})
 
         with gr.Row():
             pdf_input = gr.File(label="Upload PDF", file_types=[".pdf"], interactive=True)
-            clear_btn = gr.Button("Reset")
+            reset_btn = gr.Button("Reset session")
 
-        chatbot = gr.Chatbot(elem_id="chatbot", height=480)
-        text_input = gr.Textbox(placeholder="Type your question…", lines=1)
+        chat = gr.Chatbot(height=480)
+        inp = gr.Textbox(lines=1, placeholder="Type your question…")
 
-        pdf_input.change(upload_pdf, inputs=[pdf_input, state], outputs=[chatbot, state])
-        clear_btn.click(lambda s: ([], {k: s[k] for k in ("llm", "system_prompt")}),
-                       inputs=state, outputs=[chatbot, state])
-        text_input.submit(answer_question,
-                          inputs=[text_input, state],
-                          outputs=[chatbot, state],
-                          stream=True)
+        pdf_input.change(upload_pdf, [pdf_input, state], [chat, state])
+        reset_btn.click(lambda: ([], {"history": []}), None, [chat, state])
+        inp.submit(answer_question, [inp, state], [chat, state], stream=True)
 
-        gr.Markdown(
-            f"<small>running on **{_select_device()}** | model: **{model_name}** | "
-            f"prompt: **{prompt_path.name}**</small>"
-        )
-    return demo
+        gr.Markdown(f"<small>running on **{_device()}** | model: **{MODEL_ID}**</small>")
+    demo.launch(server_name="0.0.0.0", server_port=port, share=False)
 
-# ---------------------------------------------------------------------------
-# cli entrypoint
-# ---------------------------------------------------------------------------
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="run the pdf‑qa gradio app locally")
-    parser.add_argument("--model", default=os.getenv("MODEL_NAME", "meta-llama/Meta-Llama-3.1-8B-Instruct"),
-                        help="hf model id or local path of the causal‑lm")
-    parser.add_argument("--prompt", default=os.getenv("PROMPT_PATH", "system_prompt.md"),
-                        help="markdown file containing the system prompt")
-    parser.add_argument("--port", type=int, default=7860, help="gradio server port")
-    return parser.parse_args()
-
-
+# ------------------------------------------------------------------ main
 if __name__ == "__main__":
-    args = parse_args()
-    ui = build_ui(args.model, Path(args.prompt))
-    ui.launch(server_name="0.0.0.0", server_port=args.port, share=False)
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", default="meta-llama/Meta-Llama-3.1-8B-Instruct")
+    p.add_argument("--prompt", default="system_prompt.md")
+    p.add_argument("--port", type=int, default=7860)
+    args = p.parse_args()
+
+    MODEL_ID = args.model
+    SYSTEM_PROMPT = load_system_prompt(Path(args.prompt))
+    LLM = load_llm(MODEL_ID)  # singleton, kept outside gr.State
+
+    build_ui(args.port)

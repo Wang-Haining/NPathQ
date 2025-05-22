@@ -15,9 +15,8 @@ Workflow
 4. Chunks are stored in a local FAISS index.
 5. A `ConversationalRetrievalChain` is used. It internally creates a standalone
    question from the conversation history and the new user question. This is done
-   using a custom `LLMChain` (the `question_generator`) which uses a
-   `ChatPromptTemplate`and a `FirstLineParser` to ensure the standalone question is
-   concise.
+   using a custom `LLMChain` (the `question_generator`) which uses a `ChatPromptTemplate`
+   and a `FirstLineParser` to ensure the standalone question is concise.
 6. The standalone question is used to retrieve relevant document chunks.
 7. These chunks, along with the original conversation history (as a string) and
    the condensed question, are formatted using a custom `ChatTemplatePrompt` that
@@ -35,12 +34,13 @@ import gradio as gr
 import torch
 from docling.document_converter import DocumentConverter
 from langchain.chains import ConversationalRetrievalChain, LLMChain
-from langchain.prompts.chat import ChatPromptTemplate
-from langchain.schema import BaseOutputParser, OutputParserException
+from langchain.prompts.chat import ChatPromptTemplate # your import
+from langchain.schema import BaseOutputParser, OutputParserException # your import
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
 from langchain_community.vectorstores import FAISS
+# langchain_core.prompts.PromptTemplate is not explicitly used if CONDENSE_PROMPT is ChatPromptTemplate
 from langchain_core.prompts import StringPromptTemplate
 from pydantic import PrivateAttr
 from transformers import AutoTokenizer
@@ -52,7 +52,9 @@ LLM = None
 TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
+# CONDENSE_LLM was removed as we're using one LLM instance
 
+# your new condense prompt structure
 CONDENSE_SYSTEM = """
 You are a retrieval-assistant whose **sole job** is to
 turn a follow-up user message plus the running chat history
@@ -82,13 +84,19 @@ CONDENSE_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
-class FirstLineParser(BaseOutputParser):
+class FirstLineParser(BaseOutputParser): # your parser
     def parse(self, text: str) -> str:
+        text = text.strip() # Strip leading/trailing whitespace from the whole text first
         for line in text.splitlines():
             line = line.strip()
             if line:
                 return line
-        raise OutputParserException("condense LLM returned no content")
+        # If LLM returns only whitespace or empty string after stripping, it's effectively no content.
+        # It might also return "None" or "null" as a string, handle if necessary.
+        # For now, raising an exception if no non-empty line is found.
+        # print(f"DEBUG FirstLineParser: Received text='{text}', could not parse a valid line.") # Optional debug
+        raise OutputParserException(f"condense LLM returned no usable content. Raw output: '{text[:200]}...'")
+
 
 def _device() -> str:
     return (
@@ -161,7 +169,7 @@ class ChatTemplatePrompt(StringPromptTemplate):
 
     def format(self, **kwargs) -> str:
         ctx = kwargs["context"]
-        query = kwargs["question"]
+        query = kwargs["question"] # This should be the clean, condensed question
         chat_history_str = kwargs.get("chat_history", "")
         user_message_content_parts = []
         if chat_history_str and chat_history_str.strip():
@@ -182,6 +190,7 @@ class ChatTemplatePrompt(StringPromptTemplate):
         )
         # keeping this debug active for now
         print("\n---- DEBUG: ChatTemplatePrompt.format() - PROMPT TO TOKENIZER ----")
+        print(f"Raw condensed question received by ChatTemplatePrompt: '{query}'") # Added more specific debug
         print(formatted_prompt_str)
         print("------------------------------------------------------------------\n")
         return formatted_prompt_str
@@ -192,19 +201,23 @@ class ChatTemplatePrompt(StringPromptTemplate):
 
 
 def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
+    # prompt for the final answer
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
+    # question-generator chain with its own prompt + parser
+    # uses your new CONDENSE_PROMPT and FirstLineParser
     question_generator = LLMChain(
         llm=llm_instance,
-        prompt=CONDENSE_PROMPT,
+        prompt=CONDENSE_PROMPT, # your new ChatPromptTemplate
         output_parser=FirstLineParser(),
     )
 
     return ConversationalRetrievalChain.from_llm(
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
-        question_generator=question_generator,
+        question_generator=question_generator, # this is the correct parameter
         combine_docs_chain_kwargs={"prompt": final_answer_prompt},
+        # NO condense_question_prompt argument here
         return_source_documents=False,
     )
 
@@ -274,6 +287,13 @@ def answer(msg: str, state: Dict[str, Any]):
 
     current_assistant_response = ""
     try:
+        # For debugging the output of question_generator directly:
+        # condensed_q_result = chain.question_generator.invoke({"question": msg, "chat_history": langchain_history})
+        # print(f"DEBUG: Condensed question from question_generator: '{condensed_q_result}'")
+        # if isinstance(condensed_q_result, dict):
+        #    print(f"DEBUG: Condensed question (dict text): '{condensed_q_result.get('text')}'")
+
+
         response_payload = chain.invoke(
             {"question": msg, "chat_history": langchain_history}
         )
@@ -291,7 +311,7 @@ def answer(msg: str, state: Dict[str, Any]):
                 current_assistant_response = error_detail
     except Exception as e:
         print(f"Error during LLM invocation: {e}")
-        print(traceback.format_exc())  # i like this too
+        print(traceback.format_exc())
         current_assistant_response = (
             "Sorry, an error occurred while generating the response."
         )
@@ -423,7 +443,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=4096,  # my preferred default
+        default=4096,
         help="Max new tokens for the main LLM generation.",
     )
     parser.add_argument(
@@ -431,7 +451,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--top_p", type=float, default=0.95, help="Top_p for the LLM.")
     parser.add_argument(
-        "--share",  # my preferred name for the cli arg
+        "--share",
         action="store_true",
         help="Enable external access to the app via public Gradio link.",
     )

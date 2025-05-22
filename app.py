@@ -31,16 +31,11 @@ from langchain_community.llms import VLLM
 from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
-
-# globals for LLM instance, tokenizer, system prompt, and model ID
 LLM = None
 TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
-
-# conversation limits
 MAX_CONVERSATION_ROUNDS = 50
-# WARNING_CONVERSATION_ROUNDS = 40 # Removed
 
 
 def _device() -> str:
@@ -92,9 +87,9 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
         )
         tokenizer.chat_template = (
             tokenizer.default_chat_template
-        )  # Explicitly set it for consistency
+        )
     else:
-        # If no template is found from config or library defaults, raise an error.
+        # if no template is found from config or library defaults, raise an error
         error_message = (
             f"CRITICAL ERROR: Tokenizer for '{model_id}' does not have a `chat_template` in its "
             f"config, nor a `default_chat_template` provided by the transformers library. "
@@ -158,7 +153,7 @@ def format_llm_prompt(
 
         user_message_content_parts.append(history_section_text)
 
-    # 3. current Question
+    # 3. current question
     user_message_content_parts.append(
         f"**Current Question (based on the report and history):**\n{current_question_str}"
     )
@@ -278,7 +273,6 @@ def answer(msg: str, state: Dict[str, Any]):
         print(traceback.format_exc())
         llm_response_text = "Sorry, an error occurred while generating the response. Please check the console for details."
 
-    # Removed warning_message logic
     final_assistant_response = llm_response_text.strip()
 
     if ui_messages and ui_messages[-1]["role"] == "assistant":
@@ -457,7 +451,7 @@ if __name__ == "__main__":
         LLM, TOKENIZER = load_llm_and_tokenizer(
             MODEL_ID, max_new=args.max_new_tokens, cli_args=args
         )
-    except ValueError as e:  # Catch the specific error raised for missing templates
+    except ValueError as e:  # catch the specific error raised for missing templates
         print(e)
         exit(1)
 

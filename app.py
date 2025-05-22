@@ -107,14 +107,32 @@ class ChatTemplatePrompt(StringPromptTemplate):
     def format(self, **kwargs) -> str:
         ctx = kwargs["context"]
         query = kwargs["question"]
-        chat_history_tuples = kwargs.get("chat_history", []) # Get chat_history
+
+        chat_history_input = kwargs.get("chat_history") # Get it without default to see if None
+
+        # debug
+        print(f"DEBUG ChatTemplatePrompt: received chat_history_input is of type: {type(chat_history_input)}")
+        if isinstance(chat_history_input, str):
+            print(f"DEBUG ChatTemplatePrompt: chat_history_input (string sample): \"{chat_history_input[:100]}...\"")
+        elif isinstance(chat_history_input, list) and chat_history_input:
+            print(f"DEBUG ChatTemplatePrompt: chat_history_input (list, first item type): {type(chat_history_input[0])}")
 
         messages = [{"role": "system", "content": self._system_prompt}]
 
-        # add past conversation turns
-        for user_msg, ai_msg in chat_history_tuples:
-            messages.append({"role": "user", "content": user_msg})
-            messages.append({"role": "assistant", "content": ai_msg})
+        # process chat_history_input carefully
+        if isinstance(chat_history_input, list):
+            for item in chat_history_input:
+                if isinstance(item, (tuple, list)) and len(item) == 2:
+                    user_msg, ai_msg = item
+                    messages.append({"role": "user", "content": str(user_msg)})
+                    messages.append({"role": "assistant", "content": str(ai_msg)})
+                else:
+                    print(f"WARNING ChatTemplatePrompt: Skipping malformed item in chat_history list: {item}")
+        elif isinstance(chat_history_input, str) and chat_history_input.strip():
+            print("WARNING ChatTemplatePrompt: chat_history_input was a string. "
+                  "It will not be included in the structured 'messages' list for apply_chat_template. "
+                  "Conversational context from history might be lost for the LLM.")
+
 
         # add current user query with context
         messages.append(
@@ -124,19 +142,6 @@ class ChatTemplatePrompt(StringPromptTemplate):
                            f"Answer this question:\n{query}",
             }
         )
-
-        return self._tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        # debug print for the generated prompt from chat template
-        # formatted_prompt_str = self._tokenizer.apply_chat_template(
-        #     messages, tokenize=False, add_generation_prompt=True
-        # )
-        # print("\n---- DEBUG: ChatTemplatePrompt.format() output ----")
-        # print(formatted_prompt_str)
-        # print("----------------------------------------------------\n")
-        # return formatted_prompt_str
 
         return self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -195,14 +200,14 @@ def answer(msg: str, state: Dict[str, Any]):
         yield state.get("ui_messages", []), state
         return
 
-    if "chain" not in state or not state["chain"]:
-        # provide feedback if PDF is still processing or not uploaded
+    chain = state.get("chain")
+    if not chain:
         current_ui_messages = state.get("ui_messages", []).copy()
         # avoid adding multiple parsing messages
         if (
-            not current_ui_messages
-            or current_ui_messages[-1].get("content")
-            != "🔄 Still parsing the PDF or PDF not yet uploaded. Please wait or upload a PDF."
+                not current_ui_messages
+                or current_ui_messages[-1].get("content")
+                != "🔄 Still parsing the PDF or PDF not yet uploaded. Please wait or upload a PDF."
         ):
             current_ui_messages.append(
                 {
@@ -217,33 +222,51 @@ def answer(msg: str, state: Dict[str, Any]):
     langchain_history = state.get("langchain_history", []).copy()
 
     ui_messages.append({"role": "user", "content": msg})
+    # add a placeholder for the assistant's response while processing
+    ui_messages.append({"role": "assistant", "content": "🤔 Thinking..."}) # You can customize this message
+
+    # update state with new user message and thinking indicator before yielding
+    # this ensures the UI reflects the change immediately
+    # state["ui_messages"] = ui_messages # Not strictly necessary to update state here if yield returns it
     yield ui_messages, state
 
-    ui_messages.append({"role": "assistant", "content": ""})
     current_assistant_response = ""
-
     try:
-        for chunk in state["chain"].stream(
+        response_payload = chain.invoke(
             {"question": msg, "chat_history": langchain_history}
-        ):
-            if "answer" in chunk:
-                token = chunk["answer"]
-                current_assistant_response += token
-                ui_messages[-1]["content"] = current_assistant_response
-                yield ui_messages, state
-    except Exception as e:
-        print(f"Error during LLM streaming: {e}")
-        ui_messages[-1][
-            "content"
-        ] = "Sorry, an error occurred while generating the response."
-        state["ui_messages"] = ui_messages
-        yield ui_messages, state
-        return
+        )
 
-    ui_messages[-1]["content"] = current_assistant_response
+        # conversationalRetrievalChain typically returns a dict with an "answer" key.
+        current_assistant_response = response_payload.get("answer")
+
+        if current_assistant_response is None:
+            # fallback if 'answer' key is missing or the payload is different
+            if isinstance(response_payload, str):
+                current_assistant_response = response_payload
+            elif isinstance(response_payload, dict) and not response_payload: # Empty dict
+                current_assistant_response = "Received an empty response from the assistant."
+            else:
+                error_detail = f"Error: Could not extract answer. Response payload: {str(response_payload)[:200]}"
+                print(f"Unexpected response payload structure: {response_payload}")
+                current_assistant_response = error_detail
+
+    except Exception as e:
+        print(f"Error during LLM invocation: {e}")
+        current_assistant_response = "Sorry, an error occurred while generating the response."
+
+    # update the last message in ui_messages (the assistant's placeholder) with the actual response
+    if ui_messages and ui_messages[-1]["role"] == "assistant":
+        ui_messages[-1]["content"] = current_assistant_response
+    else:
+        # This case should ideally not be reached if the placeholder was added correctly
+        ui_messages.append({"role": "assistant", "content": current_assistant_response})
+
+    # ensure current_assistant_response is a string for history storage
+    if not isinstance(current_assistant_response, str):
+        current_assistant_response = str(current_assistant_response)
 
     state["langchain_history"].append((msg, current_assistant_response))
-    state["ui_messages"] = ui_messages
+    state["ui_messages"] = ui_messages # Final update to state
 
     yield ui_messages, state
 

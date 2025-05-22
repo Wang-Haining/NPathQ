@@ -130,7 +130,7 @@ MIT
 
 ## 🗓️ Version History
 
--   v0.1.0 (Current): *May 22, 2025* (or current date): Simplified architecture. Full PDF text loaded into LLM context. Removed vector store and retrieval chain. Added conversation limits and warnings.
+-   v0.1.0 (Current): *May 22, 2025*: Removed vector store and retrieval chain.
 -   v0.0.1: *May 21, 2025*: Initial release (with vector store and retrieval).
 
 ---

@@ -58,6 +58,7 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 1024):
         max_new_tokens=max_new,
         trust_remote_code=True,
         tensor_parallel_size=2 if '70b' in model_id.lower() else 1,
+        enforce_eager=True if '70b' in model_id.lower() else False,
         dtype="bfloat16",
         streaming=True,
         temperature=0.7,

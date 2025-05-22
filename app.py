@@ -403,7 +403,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable external access to the app via public Gradio link.",
     )
-    args = parser.parse_Aargs()  # Corrected to parser.parse_args()
+    args = parser.parse_args()
 
     MODEL_ID = args.model
 
@@ -426,7 +426,7 @@ if __name__ == "__main__":
         MODEL_ID, max_new=args.max_new_tokens, cli_args=args
     )
 
-    if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:  # Simplified check
+    if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
         missing_init = []
         if LLM is None:
             missing_init.append("LLM")

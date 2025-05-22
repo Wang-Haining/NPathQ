@@ -28,7 +28,7 @@ from typing import Any, ClassVar, Dict, List
 import gradio as gr
 import torch
 from docling.document_converter import DocumentConverter
-from langchain.chains import ConversationalRetrievalChain, LLMChain # Added LLMChain
+from langchain.chains import ConversationalRetrievalChain, LLMChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
@@ -36,7 +36,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate, StringPromptTemplate
 from pydantic import PrivateAttr
 from transformers import AutoTokenizer
-
 
 AGENT_NAME = "NPathQ"
 
@@ -56,47 +55,31 @@ def _device() -> str:
     )
 
 
-def create_condense_llm_wrapper(model_id: str, tensor_parallel_size: int, enforce_eager: bool):
+def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     """
-    Creates a VLLM wrapper instance specifically for question condensation
-    with deterministic generation parameters.
+    Loads the main VLLM instance and the tokenizer.
+    This single LLM instance will be used for both condensing and final answers.
     """
-    print("Creating VLLM wrapper for question condensation...")
-    condense_llm = VLLM(
-        model=model_id,
-        max_new_tokens=1024,
-        trust_remote_code=True,
-        tensor_parallel_size=tensor_parallel_size,
-        enforce_eager=enforce_eager,
-        dtype="bfloat16",
-        temperature=0.7,
-        top_p=0.9
-    )
-    print("Condense LLM wrapper created with deterministic parameters.")
-    return condense_llm
-
-
-def load_main_llm_and_tokenizer(model_id: str, max_new: int = 4096, cli_args=None):
-    """
-    Loads the main VLLM instance for generating final answers and the tokenizer.
-    """
-    print("Loading main VLLM and tokenizer...")
-    is_70b = '70b' in model_id.lower()
+    print("Loading VLLM and tokenizer...")
+    is_70b = "70b" in model_id.lower()
     tensor_parallel_size = 2 if is_70b else 1
     enforce_eager = True if is_70b else False
 
-    # use args for main LLM if provided, otherwise defaults
-    main_llm = VLLM(
+    llm = VLLM(
         model=model_id,
         max_new_tokens=max_new,
         trust_remote_code=True,
         tensor_parallel_size=tensor_parallel_size,
         enforce_eager=enforce_eager,
         dtype="bfloat16",
-        temperature=cli_args.temperature if cli_args and hasattr(cli_args, 'temperature') else 0.7,
-        top_p=cli_args.top_p if cli_args and hasattr(cli_args, 'top_p') else 0.9,
+        temperature=(
+            cli_args.temperature
+            if cli_args and hasattr(cli_args, "temperature")
+            else 0.7
+        ),
+        top_p=cli_args.top_p if cli_args and hasattr(cli_args, "top_p") else 0.95,
     )
-    print("Main VLLM loaded.")
+    print("VLLM loaded.")
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.chat_template is None:
         print(
@@ -105,8 +88,7 @@ def load_main_llm_and_tokenizer(model_id: str, max_new: int = 4096, cli_args=Non
             f"basic concatenation."
         )
     print("Tokenizer loaded.")
-
-    return main_llm, tokenizer, tensor_parallel_size, enforce_eager
+    return llm, tokenizer
 
 
 def pdf_to_text(pdf_path: Path) -> str:
@@ -117,7 +99,6 @@ def vector_store(text: str):
     chunks = RecursiveCharacterTextSplitter(
         chunk_size=1024, chunk_overlap=100
     ).create_documents([text])
-
     embed = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
         model_kwargs={"device": _device()},
@@ -156,7 +137,6 @@ class ChatTemplatePrompt(StringPromptTemplate):
         formatted_prompt_str = self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-
         print("\n---- DEBUG: ChatTemplatePrompt.format() - PROMPT TO TOKENIZER ----")
         print(formatted_prompt_str)
         print("------------------------------------------------------------------\n")
@@ -167,15 +147,15 @@ class ChatTemplatePrompt(StringPromptTemplate):
         return "chat-template-prompt"
 
 
-def qa_chain(vstore, system_prompt_content: str,
-             main_llm_instance, # For final answer
-             condense_llm_instance, # For question condensation
-             tokenizer_instance):
+def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
 
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
-    # more direct and forceful condense question prompt
     _template = """Given the conversation history and the follow up question, rephrase the follow up question to be a standalone question in English.
+The standalone question should be concise and accurately reflect the user's intent based on the follow up question and history.
+If the follow up question is already a standalone question, repeat it exactly.
+**Your entire response MUST be ONLY the standalone question. Do NOT include any preamble, explanation, justification, or any text other than the standalone question itself.
+The question should be a single line of text.**
 
 Chat History:
 {chat_history}
@@ -183,14 +163,13 @@ Follow Up Input: {question}
 Standalone question:"""
     CONDENSE_QUESTION_PROMPT_CUSTOM = PromptTemplate.from_template(_template)
 
-    # create a separate LLMChain for question generation using the condense_llm_instance
+    # the LLMChain for question_generator will use the main llm_instance
     question_generator_chain = LLMChain(
-        llm=condense_llm_instance,
-        prompt=CONDENSE_QUESTION_PROMPT_CUSTOM
+        llm=llm_instance, prompt=CONDENSE_QUESTION_PROMPT_CUSTOM
     )
 
     return ConversationalRetrievalChain.from_llm(
-        llm=main_llm_instance,
+        llm=llm_instance,  # Same LLM instance for the final answer
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
         combine_docs_chain_kwargs={"prompt": final_answer_prompt},
         question_generator=question_generator_chain,
@@ -199,15 +178,17 @@ Standalone question:"""
 
 
 def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
-    global LLM, CONDENSE_LLM, TOKENIZER, SYSTEM_PROMPT
+    global LLM, TOKENIZER, SYSTEM_PROMPT  # CONDENSE_LLM removed from globals here
     if pdf_file_obj is None:
         raise gr.Error("Please upload a PDF first.")
 
     missing = []
-    if LLM is None: missing.append("Main LLM")
-    if CONDENSE_LLM is None: missing.append("Condense LLM")
-    if TOKENIZER is None: missing.append("Tokenizer")
-    if SYSTEM_PROMPT is None: missing.append("System Prompt")
+    if LLM is None:
+        missing.append("LLM")
+    if TOKENIZER is None:
+        missing.append("Tokenizer")
+    if SYSTEM_PROMPT is None:
+        missing.append("System Prompt")
 
     if missing:
         raise gr.Error(
@@ -217,8 +198,8 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     txt = pdf_to_text(Path(pdf_file_obj.name))
     vstore = vector_store(txt)
 
-    # pass both LLM instances to qa_chain
-    state["chain"] = qa_chain(vstore, SYSTEM_PROMPT, LLM, CONDENSE_LLM, TOKENIZER)
+    # pass the single LLM instance to qa_chain
+    state["chain"] = qa_chain(vstore, SYSTEM_PROMPT, LLM, TOKENIZER)
     state["langchain_history"] = []
     ui_message = [{"role": "system", "content": "PDF parsed. Ask away!"}]
     state["ui_messages"] = ui_message
@@ -239,9 +220,9 @@ def answer(msg: str, state: Dict[str, Any]):
     if not chain:
         current_ui_messages = state.get("ui_messages", []).copy()
         if (
-                not current_ui_messages
-                or current_ui_messages[-1].get("content")
-                != "🔄 Still parsing the PDF or PDF not yet uploaded. Please wait or upload a PDF."
+            not current_ui_messages
+            or current_ui_messages[-1].get("content")
+            != "🔄 Still parsing the PDF or PDF not yet uploaded. Please wait or upload a PDF."
         ):
             current_ui_messages.append(
                 {
@@ -269,7 +250,9 @@ def answer(msg: str, state: Dict[str, Any]):
             if isinstance(response_payload, str):
                 current_assistant_response = response_payload
             elif isinstance(response_payload, dict) and not response_payload:
-                current_assistant_response = "Received an empty response from the assistant."
+                current_assistant_response = (
+                    "Received an empty response from the assistant."
+                )
             else:
                 error_detail = f"Error: Could not extract answer. Response payload: {str(response_payload)[:200]}"
                 print(f"Unexpected response payload structure: {response_payload}")
@@ -277,7 +260,9 @@ def answer(msg: str, state: Dict[str, Any]):
     except Exception as e:
         print(f"Error during LLM invocation: {e}")
         print(traceback.format_exc())
-        current_assistant_response = "Sorry, an error occurred while generating the response."
+        current_assistant_response = (
+            "Sorry, an error occurred while generating the response."
+        )
 
     if ui_messages and ui_messages[-1]["role"] == "assistant":
         ui_messages[-1]["content"] = current_assistant_response
@@ -327,7 +312,7 @@ FOOTER_TEXT = (
 )
 
 
-def build_ui(port: int, share_the_ui: bool): # Renamed 'share' to 'share_the_ui'
+def build_ui(port: int, share_the_ui: bool):  # Renamed 'share' to 'share_the_ui'
     global MODEL_ID
     with gr.Blocks(css=CUSTOM_CSS) as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
@@ -376,9 +361,7 @@ def build_ui(port: int, share_the_ui: bool): # Renamed 'share' to 'share_the_ui'
         )
 
         box.submit(fn=answer, inputs=[box, app_state], outputs=[chat, app_state])
-        box.submit(
-            fn=lambda: "", inputs=None, outputs=[box], queue=False
-        )
+        box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False)
         gr.Markdown(FOOTER_TEXT, elem_id="footer-info-md")
         gr.Markdown(
             f"<small>Device: {_device()} | LLM: {MODEL_ID}</small>",
@@ -408,20 +391,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=2048,
+        default=4096,
         help="Max new tokens for the main LLM generation.",
     )
     parser.add_argument(
-        "--temperature", type=float, default=0.7, help="Temperature for the main LLM."
+        "--temperature", type=float, default=0.7, help="Temperature for the LLM."
     )
+    parser.add_argument("--top_p", type=float, default=0.95, help="Top_p for the LLM.")
     parser.add_argument(
-        "--top_p", type=float, default=0.9, help="Top_p for the main LLM."
+        "--share",
+        action="store_true",
+        help="Enable external access to the app via public Gradio link.",
     )
-    parser.add_argument(
-        "--share", action="store_true",
-        help="Enable external access to the app via public Gradio link."
-    )
-    args = parser.parse_args()
+    args = parser.parse_Aargs()  # Corrected to parser.parse_args()
 
     MODEL_ID = args.model
 
@@ -439,27 +421,19 @@ if __name__ == "__main__":
         print(f"ERROR: Could not read system prompt file '{system_prompt_path}': {e}")
         exit(1)
 
-    # load main LLM and tokenizer, also get engine params for condense LLM
-    LLM, TOKENIZER, engine_tp_size, engine_enforce_eager = load_main_llm_and_tokenizer(
-        MODEL_ID,
-        max_new=args.max_new_tokens,
-        cli_args=args
+    # load single LLM and tokenizer
+    LLM, TOKENIZER = load_llm_and_tokenizer(
+        MODEL_ID, max_new=args.max_new_tokens, cli_args=args
     )
 
-    # create the condense LLM wrapper using the same model ID and engine params
-    CONDENSE_LLM = create_condense_llm_wrapper(
-        MODEL_ID,
-        tensor_parallel_size=engine_tp_size,
-        enforce_eager=engine_enforce_eager
-    )
-
-    # final check for all critical components
-    if LLM is None or CONDENSE_LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
+    if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:  # Simplified check
         missing_init = []
-        if LLM is None: missing_init.append("Main LLM")
-        if CONDENSE_LLM is None: missing_init.append("Condense LLM")
-        if TOKENIZER is None: missing_init.append("Tokenizer")
-        if SYSTEM_PROMPT is None: missing_init.append("SYSTEM_PROMPT text")
+        if LLM is None:
+            missing_init.append("LLM")
+        if TOKENIZER is None:
+            missing_init.append("Tokenizer")
+        if SYSTEM_PROMPT is None:
+            missing_init.append("SYSTEM_PROMPT text")
         raise RuntimeError(
             f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting."
         )

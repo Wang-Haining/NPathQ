@@ -329,7 +329,7 @@ def build_ui(port: int, share_the_ui: bool):
     global MODEL_ID
     with gr.Blocks(css=CUSTOM_CSS) as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
-        gr.Markdown("Simplified Neuropathology Report QA Agent", elem_id="sub-title-md")
+        gr.Markdown("Neuropathology Report QA Made Easy & Private", elem_id="sub-title-md")
 
         initial_ui_messages_val = [
             {"role": "system", "content": "Please upload a PDF to begin."}

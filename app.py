@@ -108,7 +108,7 @@ class ChatTemplatePrompt(StringPromptTemplate):
         ctx = kwargs["context"]
         query = kwargs["question"]
 
-        chat_history_input = kwargs.get("chat_history") # Get it without default to see if None
+        chat_history_input = kwargs.get("chat_history")
 
         # debug
         print(f"DEBUG ChatTemplatePrompt: received chat_history_input is of type: {type(chat_history_input)}")
@@ -132,7 +132,6 @@ class ChatTemplatePrompt(StringPromptTemplate):
             print("WARNING ChatTemplatePrompt: chat_history_input was a string. "
                   "It will not be included in the structured 'messages' list for apply_chat_template. "
                   "Conversational context from history might be lost for the LLM.")
-
 
         # add current user query with context
         messages.append(

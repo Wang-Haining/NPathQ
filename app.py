@@ -1,9 +1,9 @@
-"""NPathQ: A Neuropathology Report QA Agent
+"""NPathQ: A Neuropathology Report QA Agent (Simplified)
 
 This offline Gradio application lets you chat with the contents of a neuropathology
 report PDF using any locally available LLM (default: Llama‑3.1‑8B‑Instruct).
 
-Workflow
+Simplified Workflow
 -------------------
 1. Upload a PDF.
 2. The file is parsed to plain text by `docling`.
@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Tuple
 import gradio as gr
 import torch
 from docling.document_converter import DocumentConverter
-from langchain_community.llms import VLLM
+from langchain_community.llms import VLLM # Still using the VLLM wrapper
 from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
@@ -38,13 +38,12 @@ TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
 
-# conversation limits
+# Conversation limits
 MAX_CONVERSATION_ROUNDS = 50
 WARNING_CONVERSATION_ROUNDS = 40
 
 
 def _device() -> str:
-    # this function can indicate general GPU availability if VLLM is using it.
     return (
         "cuda:1"
         if torch.cuda.device_count() > 1
@@ -87,7 +86,24 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
               f"Using its `default_chat_template` provided by the transformers library.")
         tokenizer.chat_template = tokenizer.default_chat_template
     else:
-        raise ValueError('Template Error.')
+        llama3_template_str = (
+            "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}"
+            "{{ bos_token }}"
+            "{% if system_message %}{{ '<|start_header_id|>system<|end_header_id|>\n\n' + system_message + '<|eot_id|>' }}{% endif %}"
+            "{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}"
+            "{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' }}{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
+        )
+        if "llama-3" in model_id.lower() or "llama3" in model_id.lower():
+            tokenizer.chat_template = llama3_template_str
+            print(f"WARNING: Tokenizer for {model_id} had no chat_template in config and no library default. "
+                  f"Applied a hardcoded Llama-3 template as a fallback. This is not ideal.")
+        else:
+            print(
+                f"CRITICAL WARNING: Tokenizer for {model_id} does not have a `chat_template` in its config, "
+                f"nor a `default_chat_template` from the library, and no known fallback was applied. "
+                f"Chat formatting will likely be incorrect or fail."
+            )
 
     print("Tokenizer loaded and chat template handling complete.")
     return llm, tokenizer
@@ -125,19 +141,24 @@ def format_llm_prompt(
         f"**Full Neuropathology Report Content:**\n{pdf_content_str}"
     )
 
-    # 2. conversation History (if any)
-    # use only the last MAX_CONVERSATION_ROUNDS from history_tuples
+    # 2. Conversation History (if any)
+    # Use only the last MAX_CONVERSATION_ROUNDS from history_tuples
     if history_tuples:
         relevant_history = history_tuples[-MAX_CONVERSATION_ROUNDS:]
         history_block_parts = []
         for user_msg, assistant_msg in relevant_history:
-            history_block_parts.append(f"User: {user_msg}")
-            history_block_parts.append(f"Assistant: {assistant_msg}")
-        user_message_content_parts.append(
-            f"**Conversation History (most recent {len(relevant_history)} turns):**\n{'\n'.join(history_block_parts)}"
-        )
+            history_block_parts.append(f"User: {str(user_msg)}") # Explicitly stringify
+            history_block_parts.append(f"Assistant: {str(assistant_msg)}") # Explicitly stringify
 
-    # 3. current Question
+        # First, create the multi-line string for the history block
+        joined_history_str = '\n'.join(history_block_parts)
+
+        # Then, create the full history section string using an f-string
+        history_section_text = f"**Conversation History (most recent {len(relevant_history)} turns):**\n{joined_history_str}"
+
+        user_message_content_parts.append(history_section_text)
+
+    # 3. Current Question
     user_message_content_parts.append(
         f"**Current Question (based on the report and history):**\n{current_question_str}"
     )
@@ -146,27 +167,46 @@ def format_llm_prompt(
     messages.append({"role": "user", "content": full_user_content})
 
     try:
-        formatted_prompt = tokenizer_instance.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-    except Exception as e:
+        if tokenizer_instance.chat_template is None and not (hasattr(tokenizer_instance, 'default_chat_template') and tokenizer_instance.default_chat_template):
+            print("CRITICAL ERROR in format_llm_prompt: Tokenizer has no chat_template and no default_chat_template. Prompt formatting will likely fail or be incorrect.")
+            # Fallback to a very basic structure if no template is available at all
+            # This is a last resort and might not be ideal for the model.
+            if messages[0]['role'] == 'system':
+                 formatted_prompt = messages[0]['content'] + "\n\n" + messages[1]['content']
+            else: # Should not happen if system prompt is always first
+                 formatted_prompt = messages[0]['content']
+            print("Warning: Using extremely basic concatenation for prompt due to missing template in tokenizer.")
+        else:
+            formatted_prompt = tokenizer_instance.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+    except Exception as e: # Catch errors from apply_chat_template itself
         print(f"Error applying chat template: {e}")
-        # fallback for very basic tokenizers if template is broken or missing despite checks
+        print(traceback.format_exc())
+        # Fallback for very basic tokenizers if template is broken or apply_chat_template fails
         if messages[0]['role'] == 'system':
-            formatted_prompt = messages[0]['content'] + "\n" + messages[1]['content']
+            formatted_prompt = messages[0]['content'] + "\n\n" + messages[1]['content']
         else:
             formatted_prompt = messages[0]['content']
-        print("Warning: Using basic concatenation for prompt due to template error.")
+        print("Warning: Using basic concatenation for prompt due to template application error.")
 
 
     print("\n---- DEBUG: format_llm_prompt - PROMPT TO TOKENIZER (STRUCTURE) ----")
-    print(f"System Prompt: {messages[0]['content'][:200]}...")
+    # Truncate print outputs for very long strings (like PDF content)
+    system_content_preview = messages[0]['content'][:200] + ("..." if len(messages[0]['content']) > 200 else "")
+    print(f"System Prompt: {system_content_preview}")
+
     if len(messages) > 1:
-         print(f"User Content (start): {messages[1]['content'][:300]}...")
-         print(f"User Content (end): ...{messages[1]['content'][-300:]}")
-    print("--- Generated Prompt String (first 300 chars) ---")
-    print(formatted_prompt[:300])
-    print(f"--- Generated Prompt String Length: {len(formatted_prompt)} ---")
+         user_content_preview_start = messages[1]['content'][:300] + ("..." if len(messages[1]['content']) > 300 else "")
+         user_content_preview_end = ("..." if len(messages[1]['content']) > 600 else "") + messages[1]['content'][-300:]
+         print(f"User Content (start): {user_content_preview_start}")
+         if len(messages[1]['content']) > 600 : # Only print end if it's different enough from start
+            print(f"User Content (end): {user_content_preview_end}")
+
+    prompt_length = len(formatted_prompt)
+    print(f"--- Generated Prompt String Length: {prompt_length} ---")
+    # Optionally print a small piece of the actual formatted prompt for verification
+    # print(f"--- Formatted Prompt Snippet: {formatted_prompt[:200]}... ---")
     print("------------------------------------------------------------------\n")
     return formatted_prompt
 
@@ -187,7 +227,7 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
 
     txt = pdf_to_text(Path(pdf_file_obj.name))
     state["pdf_text"] = txt
-    state["conversation_history"] = [] # Reset history for the new PDF
+    state["conversation_history"] = []
     ui_message = [{"role": "system", "content": "PDF parsed. You can now ask questions about its content."}]
     state["ui_messages"] = ui_message
 
@@ -229,7 +269,6 @@ def answer(msg: str, state: Dict[str, Any]):
             msg,
             TOKENIZER,
         )
-        # VLLM's invoke method directly takes the prompt string
         llm_response_text = LLM.invoke(prompt_str)
         if not llm_response_text or not llm_response_text.strip():
             llm_response_text = "I received an empty response from the model. Please try rephrasing your question."
@@ -239,9 +278,8 @@ def answer(msg: str, state: Dict[str, Any]):
         print(traceback.format_exc())
         llm_response_text = "Sorry, an error occurred while generating the response. Please check the console for details."
 
-    # add conversation length warning if needed
     warning_message = ""
-    num_rounds_completed = len(conversation_history_for_prompt) # Rounds *before* this one
+    num_rounds_completed = len(conversation_history_for_prompt)
 
     if num_rounds_completed + 1 >= MAX_CONVERSATION_ROUNDS:
         warning_message = (
@@ -260,11 +298,10 @@ def answer(msg: str, state: Dict[str, Any]):
 
     if ui_messages and ui_messages[-1]["role"] == "assistant":
         ui_messages[-1]["content"] = final_assistant_response
-    else: # Should not happen if "Thinking..." was appended
+    else:
         ui_messages.append({"role": "assistant", "content": final_assistant_response})
 
-    # Update history *after* getting the response for *this* turn
-    state["conversation_history"].append((msg, llm_response_text.strip())) # Store raw response
+    state["conversation_history"].append((msg, llm_response_text.strip()))
     state["ui_messages"] = ui_messages
     yield ui_messages, state
 
@@ -276,7 +313,6 @@ def reset_session(state: Dict[str, Any]):
     state["pdf_text"] = None
     state["conversation_history"] = []
     state["ui_messages"] = initial_ui_messages
-    # also reset the textbox
     return initial_ui_messages, state, gr.update(value="", placeholder="Upload a PDF to begin asking questions.", interactive=False)
 
 
@@ -306,9 +342,8 @@ def build_ui(port: int, share_the_ui: bool):
     global MODEL_ID
     with gr.Blocks(css=CUSTOM_CSS) as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
-        gr.Markdown("Simplified Neuropathology Report QA Agent", elem_id="sub-title-md") # Updated subtitle
+        gr.Markdown("Simplified Neuropathology Report QA Agent", elem_id="sub-title-md")
 
-        # initial state values
         initial_ui_messages_val = [{"role": "system", "content": "Please upload a PDF to begin."}]
         app_state = gr.State(
             {
@@ -324,18 +359,17 @@ def build_ui(port: int, share_the_ui: bool):
         chat = gr.Chatbot(
             value=initial_ui_messages_val,
             label=f"{AGENT_NAME} Chat",
-            height=500, #
+            height=500,
             show_copy_button=True,
-            bubble_full_width=False, # For better message alignment
+            bubble_full_width=False,
             layout="panel",
         )
-
 
         box = gr.Textbox(
             lines=1,
             placeholder="Upload a PDF to begin asking questions.",
             label="Your Question",
-            scale=7, #
+            scale=7,
             interactive=False,
         )
         pdf_file.change(
@@ -347,12 +381,11 @@ def build_ui(port: int, share_the_ui: bool):
         reset_btn.click(
             reset_session,
             inputs=[app_state],
-            outputs=[chat, app_state, box] # reset_session now also outputs for the textbox
+            outputs=[chat, app_state, box]
         )
-        # .then removed as reset_session now handles the textbox update.
 
         box.submit(fn=answer, inputs=[box, app_state], outputs=[chat, app_state])
-        box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False) # Clears textbox after submit
+        box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False)
 
         gr.Markdown(FOOTER_TEXT, elem_id="footer-info-md")
         gr.Markdown(
@@ -383,13 +416,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=4096, # Increased from original 2048, good for comprehensive answers
+        default=4096,
         help="Max new tokens for the main LLM generation.",
     )
     parser.add_argument(
-        "--temperature", type=float, default=0.6, help="Temperature for the LLM." # Slightly lower default
+        "--temperature", type=float, default=0.6, help="Temperature for the LLM."
     )
-    parser.add_argument("--top_p", type=float, default=0.9, help="Top_p for the LLM.") # Slightly lower default
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top_p for the LLM.")
     parser.add_argument(
         "--share",
         action="store_true",
@@ -419,7 +452,6 @@ if __name__ == "__main__":
         print(f"ERROR: Could not read system prompt file '{system_prompt_path}': {e}")
         exit(1)
 
-    # load single LLM and tokenizer
     LLM, TOKENIZER = load_llm_and_tokenizer(
         MODEL_ID, max_new=args.max_new_tokens, cli_args=args
     )
@@ -428,8 +460,7 @@ if __name__ == "__main__":
         missing_init = []
         if LLM is None: missing_init.append("LLM")
         if TOKENIZER is None: missing_init.append("Tokenizer")
-        if SYSTEM_PROMPT is None: missing_init.append("SYSTEM_PROMPT text") # Should be caught by earlier checks
-        # This specific error condition might be redundant due to earlier exits, but good as a safeguard.
+        if SYSTEM_PROMPT is None: missing_init.append("SYSTEM_PROMPT text")
         raise RuntimeError(
             f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting."
         )

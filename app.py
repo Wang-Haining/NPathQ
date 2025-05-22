@@ -197,14 +197,23 @@ class ChatTemplatePrompt(StringPromptTemplate):
 
 
 def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
+    # prompt for the final answer
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
+
+    # question-generator chain using your CONDENSE_PROMPT (ChatPromptTemplate)
+    # and crucially, your FirstLineParser
+    question_generator_chain = LLMChain(
+        llm=llm_instance,
+        prompt=CONDENSE_PROMPT,
+        output_parser=FirstLineParser(),
+    )
 
     return ConversationalRetrievalChain.from_llm(
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
-        condense_question_llm=llm_instance,
-        condense_question_prompt=CONDENSE_PROMPT,
+        question_generator=question_generator_chain, # Pass the fully formed LLMChain
         combine_docs_chain_kwargs={"prompt": final_answer_prompt},
+        # DO NOT pass condense_question_prompt or condense_question_llm here
         return_source_documents=False,
     )
 

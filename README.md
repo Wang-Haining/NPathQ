@@ -1,20 +1,8 @@
 # 🧠 NPathQ: A Neuropathology Report QA Agent
 
-**NPathQ** is a fully offline, privacy-first question answering agent built for analyzing neuropathology reports (PDFs). 
-It leverages HuggingFace-compatible large language models (LLMs) (default: *Meta-Llama-3.1-8B-Instruct*) and document 
-parsing tools from the [Docling](https://github.com/docling-project/docling) framework.
-
----
-
-## 🧱 Project Structure
-
-```
-.
-├── app.py                 # Main Gradio app entry point
-├── system_prompt.md       # Custom system prompt for LLM
-├── requirements.txt       # Frozen pip dependencies
-└── README.md              # This file
-```
+**NPathQ** is a privacy-first question answering agent built for analyzing neuropathology reports (PDFs). 
+It features an LLM backend, multi-round conversation with memory, and document parsing tools from 
+the [Docling](https://github.com/docling-project/docling) framework.
 
 ---
 
@@ -87,6 +75,17 @@ After uploading a report, you can ask questions like:
 
 ---
 
+
+## 🧱 Project Structure
+
+```
+.
+├── app.py                 # Main Gradio app entry point
+├── system_prompt.md       # Custom system prompt for LLM
+├── requirements.txt       # Frozen pip dependencies
+└── README.md              # This file
+```
+---
 
 ## 🧑‍💻 Credits
 

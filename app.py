@@ -374,7 +374,7 @@ def build_ui(port: int, share_ui: bool):
             elem_id="device-model-info-md",
         )
     print(f"Starting {AGENT_NAME} on http://0.0.0.0:{port}")
-    demo.launch(server_name="0.0.0.0", server_port=port, share_ui=False)
+    demo.launch(server_name="0.0.0.0", server_port=port, share=share_ui)
 
 
 if __name__ == "__main__":

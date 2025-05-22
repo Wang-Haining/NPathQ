@@ -1,4 +1,4 @@
-"""NPathQ: A Neuropathology Report QA Agent (Simplified)
+"""NPathQ: A Neuropathology Report QA Agent
 
 This offline Gradio application lets you chat with the contents of a neuropathology
 report PDF using any locally available LLM (default: Llama‑3.1‑8B‑Instruct).
@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Tuple
 import gradio as gr
 import torch
 from docling.document_converter import DocumentConverter
-from langchain_community.llms import VLLM # Still using the VLLM wrapper
+from langchain_community.llms import VLLM
 from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
@@ -38,7 +38,7 @@ TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
 
-# Conversation limits
+# conversation limits
 MAX_CONVERSATION_ROUNDS = 50
 WARNING_CONVERSATION_ROUNDS = 40
 
@@ -136,29 +136,29 @@ def format_llm_prompt(
 
     user_message_content_parts = []
 
-    # 1. PDF Content
+    # 1. pdf Content
     user_message_content_parts.append(
         f"**Full Neuropathology Report Content:**\n{pdf_content_str}"
     )
 
-    # 2. Conversation History (if any)
-    # Use only the last MAX_CONVERSATION_ROUNDS from history_tuples
+    # 2. conversation History (if any)
+    # use only the last MAX_CONVERSATION_ROUNDS from history_tuples
     if history_tuples:
         relevant_history = history_tuples[-MAX_CONVERSATION_ROUNDS:]
         history_block_parts = []
         for user_msg, assistant_msg in relevant_history:
-            history_block_parts.append(f"User: {str(user_msg)}") # Explicitly stringify
-            history_block_parts.append(f"Assistant: {str(assistant_msg)}") # Explicitly stringify
+            history_block_parts.append(f"User: {str(user_msg)}")
+            history_block_parts.append(f"Assistant: {str(assistant_msg)}")
 
-        # First, create the multi-line string for the history block
+        # first, create the multi-line string for the history block
         joined_history_str = '\n'.join(history_block_parts)
 
-        # Then, create the full history section string using an f-string
+        # then, create the full history section string using an f-string
         history_section_text = f"**Conversation History (most recent {len(relevant_history)} turns):**\n{joined_history_str}"
 
         user_message_content_parts.append(history_section_text)
 
-    # 3. Current Question
+    # 3. current Question
     user_message_content_parts.append(
         f"**Current Question (based on the report and history):**\n{current_question_str}"
     )
@@ -169,30 +169,27 @@ def format_llm_prompt(
     try:
         if tokenizer_instance.chat_template is None and not (hasattr(tokenizer_instance, 'default_chat_template') and tokenizer_instance.default_chat_template):
             print("CRITICAL ERROR in format_llm_prompt: Tokenizer has no chat_template and no default_chat_template. Prompt formatting will likely fail or be incorrect.")
-            # Fallback to a very basic structure if no template is available at all
-            # This is a last resort and might not be ideal for the model.
             if messages[0]['role'] == 'system':
-                 formatted_prompt = messages[0]['content'] + "\n\n" + messages[1]['content']
-            else: # Should not happen if system prompt is always first
-                 formatted_prompt = messages[0]['content']
+                formatted_prompt = messages[0]['content'] + "\n\n" + messages[1]['content']
+            else:
+                formatted_prompt = messages[0]['content']
             print("Warning: Using extremely basic concatenation for prompt due to missing template in tokenizer.")
         else:
             formatted_prompt = tokenizer_instance.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-    except Exception as e: # Catch errors from apply_chat_template itself
+    except Exception as e:
         print(f"Error applying chat template: {e}")
         print(traceback.format_exc())
-        # Fallback for very basic tokenizers if template is broken or apply_chat_template fails
+
         if messages[0]['role'] == 'system':
             formatted_prompt = messages[0]['content'] + "\n\n" + messages[1]['content']
         else:
             formatted_prompt = messages[0]['content']
         print("Warning: Using basic concatenation for prompt due to template application error.")
 
-
     print("\n---- DEBUG: format_llm_prompt - PROMPT TO TOKENIZER (STRUCTURE) ----")
-    # Truncate print outputs for very long strings (like PDF content)
+    # truncate print outputs for very long strings (like PDF content)
     system_content_preview = messages[0]['content'][:200] + ("..." if len(messages[0]['content']) > 200 else "")
     print(f"System Prompt: {system_content_preview}")
 
@@ -200,12 +197,12 @@ def format_llm_prompt(
          user_content_preview_start = messages[1]['content'][:300] + ("..." if len(messages[1]['content']) > 300 else "")
          user_content_preview_end = ("..." if len(messages[1]['content']) > 600 else "") + messages[1]['content'][-300:]
          print(f"User Content (start): {user_content_preview_start}")
-         if len(messages[1]['content']) > 600 : # Only print end if it's different enough from start
+         if len(messages[1]['content']) > 600 : # only print end if it's different enough from start
             print(f"User Content (end): {user_content_preview_end}")
 
     prompt_length = len(formatted_prompt)
     print(f"--- Generated Prompt String Length: {prompt_length} ---")
-    # Optionally print a small piece of the actual formatted prompt for verification
+    # optionally print a small piece of the actual formatted prompt for verification
     # print(f"--- Formatted Prompt Snippet: {formatted_prompt[:200]}... ---")
     print("------------------------------------------------------------------\n")
     return formatted_prompt
@@ -361,8 +358,8 @@ def build_ui(port: int, share_the_ui: bool):
             label=f"{AGENT_NAME} Chat",
             height=500,
             show_copy_button=True,
-            bubble_full_width=False,
             layout="panel",
+            type="messages"
         )
 
         box = gr.Textbox(

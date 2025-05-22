@@ -66,7 +66,6 @@ You can upload a neuropathology PDF, and its entire text content will be used in
 -   `--max_new_tokens`: Max new tokens for LLM generation (default: `4096`).
 -   `--temperature`: Temperature for the LLM (default: `0.6`).
 -   `--top_p`: Top_p for the LLM (default: `0.9`).
--   `--share`: Enable public exposure of the service. **Only use with redacted files.**
 
 ---
 

@@ -38,6 +38,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import StringPromptTemplate
+from pydantic import PrivateAttr
 from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
@@ -90,28 +91,32 @@ def vector_store(text: str):
 
 
 class ChatTemplatePrompt(StringPromptTemplate):
-    """Wrap HF tokenizer.chat_template so LangChain can inject vars."""
+    """Wrap HF `tokenizer.chat_template` so LangChain can inject vars."""
 
-    # tell Pydantic this is a plain class-level constant, not a field
+    # ---------------- Pydantic bookkeeping -----------------
     input_variables: ClassVar[List[str]] = ["context", "question"]
+
+    # tell Pydantic these two attrs are just implementation details
+    _system_prompt: str = PrivateAttr()
+    _tokenizer: Any     = PrivateAttr()
+    # -------------------------------------------------------
 
     def __init__(self, system_prompt: str, tokenizer):
         super().__init__()
-        self.system_prompt = system_prompt
-        self.tokenizer = tokenizer
+        self._system_prompt = system_prompt
+        self._tokenizer = tokenizer
 
-    # LangChain calls this at runtime
     def format(self, **kwargs) -> str:
         ctx   = kwargs["context"]
         query = kwargs["question"]
 
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": self._system_prompt},
             {"role": "user",
              "content": f"Based on the following context:\n\n{ctx}\n\n"
                         f"Answer this question:\n{query}"}
         ]
-        return self.tokenizer.apply_chat_template(
+        return self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
 

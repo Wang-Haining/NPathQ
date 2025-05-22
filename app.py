@@ -32,7 +32,6 @@ import gradio as gr
 import torch
 from docling.document_converter import DocumentConverter
 from langchain.chains import ConversationalRetrievalChain
-from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
@@ -65,6 +64,8 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 1024):
         tensor_parallel_size=1,
         dtype="bfloat16",
         streaming=True,
+        temperature=0.7,
+        top_p=0.95,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.chat_template is None:
@@ -92,17 +93,12 @@ def vector_store(text: str):
 
 class ChatTemplatePrompt(StringPromptTemplate):
     """Wrap HF `tokenizer.chat_template` so LangChain can inject vars."""
-
-    # ---------------- Pydantic bookkeeping -----------------
     input_variables: ClassVar[List[str]] = ["context", "question"]
-
-    # tell Pydantic these two attrs are just implementation details
     _system_prompt: str = PrivateAttr()
     _tokenizer: Any = PrivateAttr()
-    # -------------------------------------------------------
 
-    def __init__(self, system_prompt: str, tokenizer):
-        super().__init__()
+    def __init__(self, system_prompt: str, tokenizer, **kwargs): # Added **kwargs
+        super().__init__(input_variables=self.input_variables, **kwargs) # Pass kwargs to parent
         self._system_prompt = system_prompt
         self._tokenizer = tokenizer
 
@@ -118,9 +114,24 @@ class ChatTemplatePrompt(StringPromptTemplate):
                 f"Answer this question:\n{query}",
             },
         ]
+
+        # Debug print for the generated prompt from chat template
+        # formatted_prompt_str = self._tokenizer.apply_chat_template(
+        #     messages, tokenize=False, add_generation_prompt=True
+        # )
+        # print("\n---- DEBUG: ChatTemplatePrompt.format() output ----")
+        # print(formatted_prompt_str)
+        # print("----------------------------------------------------\n")
+        # return formatted_prompt_str
+
         return self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+
+    @property
+    def _prompt_type(self) -> str:
+        """Required by Langchain for custom prompts."""
+        return "chat-template-prompt"
 
 
 def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
@@ -131,6 +142,8 @@ def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instanc
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
         combine_docs_chain_kwargs={"prompt": prompt},
         return_source_documents=False,
+        # To ensure condense_question_prompt also uses chat template if issues persist:
+        # condense_question_prompt = ChatTemplatePrompt(...) for condense step
     )
 
 
@@ -140,12 +153,9 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
         raise gr.Error("Please upload a PDF first.")
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
         missing = []
-        if LLM is None:
-            missing.append("LLM")
-        if TOKENIZER is None:
-            missing.append("Tokenizer")
-        if SYSTEM_PROMPT is None:
-            missing.append("System Prompt")
+        if LLM is None: missing.append("LLM")
+        if TOKENIZER is None: missing.append("Tokenizer")
+        if SYSTEM_PROMPT is None: missing.append("System Prompt")
         raise gr.Error(
             f"{', '.join(missing)} not initialized. Please ensure system_prompt.md exists and restart the application."
         )
@@ -158,7 +168,8 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     ui_message = [{"role": "system", "content": "PDF parsed. Ask away!"}]
     state["ui_messages"] = ui_message
 
-    return ui_message, state, gr.Textbox.update(interactive=True)
+    # Corrected Gradio update syntax
+    return ui_message, state, gr.update(interactive=True, placeholder="Type your question and press Enter…")
 
 
 def answer(msg: str, state: Dict[str, Any]):
@@ -167,14 +178,17 @@ def answer(msg: str, state: Dict[str, Any]):
         return
 
     if "chain" not in state or not state["chain"]:
-        ui = state.get("ui_messages", [])
-        ui.append(
-            {
-                "role": "assistant",
-                "content": "🔄 Still parsing the PDF… I’ll be ready in a few seconds.",
-            }
-        )
-        yield ui, state
+        # Provide feedback if PDF is still processing or not uploaded
+        current_ui_messages = state.get("ui_messages", []).copy()
+        # Avoid adding multiple parsing messages
+        if not current_ui_messages or current_ui_messages[-1].get("content") != "🔄 Still parsing the PDF or PDF not yet uploaded. Please wait or upload a PDF.":
+            current_ui_messages.append(
+                {
+                    "role": "assistant",
+                    "content": "🔄 Still parsing the PDF or PDF not yet uploaded. Please wait or upload a PDF.",
+                }
+            )
+        yield current_ui_messages, state
         return
 
     ui_messages = state.get("ui_messages", []).copy()
@@ -275,20 +289,22 @@ def build_ui(port: int):
         )
         box = gr.Textbox(
             lines=1,
-            placeholder="Type your question and press Enter…",
+            placeholder="Upload a PDF to begin asking questions.", # Initial placeholder
             label="Your Question",
             scale=7,
+            interactive=False # Initially not interactive
         )
         pdf_file.change(
-            upload_pdf, inputs=[pdf_file, app_state], outputs=[chat, app_state, box]
+            upload_pdf, inputs=[pdf_file, app_state], outputs=[chat, app_state, box] # box is now an output
         )
 
         reset_btn.click(
             reset_session, inputs=[app_state], outputs=[chat, app_state]
-        ).then(lambda: gr.Textbox.update(interactive=False), None, [box])
+        ).then(lambda: gr.update(interactive=False, placeholder="Upload a PDF to begin asking questions."), # Corrected update
+               inputs=None, outputs=[box])
 
         box.submit(fn=answer, inputs=[box, app_state], outputs=[chat, app_state])
-        box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False)
+        box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False) # Clear box after submit
         gr.Markdown(FOOTER_TEXT, elem_id="footer-info-md")
         gr.Markdown(
             f"<small>Device: {_device()} | LLM: {MODEL_ID}</small>",
@@ -309,7 +325,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--prompt",
-        default="system_prompt.md",  # This argument specifies the file name
+        default="system_prompt.md",
         help="Path to the system prompt Markdown file. This file MUST exist.",
     )
     parser.add_argument(
@@ -331,11 +347,11 @@ if __name__ == "__main__":
         print(
             "Please create this file with your desired system prompt or check the path."
         )
-        exit(1)  # exit if the file is not found
+        exit(1)
 
     try:
         SYSTEM_PROMPT = system_prompt_path.read_text().strip()
-        if not SYSTEM_PROMPT:  # check if the file is empty
+        if not SYSTEM_PROMPT:
             print(f"ERROR: System prompt file '{system_prompt_path}' is empty.")
             print("Please ensure the file contains a valid system prompt.")
             exit(1)
@@ -348,15 +364,11 @@ if __name__ == "__main__":
     LLM, TOKENIZER = load_llm_and_tokenizer(MODEL_ID, max_new=args.max_new_tokens)
     print("LLM and Tokenizer loaded.")
 
-    # final check, though the exit(1) calls above should prevent reaching here if there's an issue
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
         missing_init = []
-        if LLM is None:
-            missing_init.append("LLM")
-        if TOKENIZER is None:
-            missing_init.append("Tokenizer")
-        if SYSTEM_PROMPT is None:
-            missing_init.append("SYSTEM_PROMPT text")
+        if LLM is None: missing_init.append("LLM")
+        if TOKENIZER is None: missing_init.append("Tokenizer")
+        if SYSTEM_PROMPT is None: missing_init.append("SYSTEM_PROMPT text")
         raise RuntimeError(
             f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting."
         )

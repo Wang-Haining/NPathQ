@@ -1,11 +1,7 @@
-"""
-NPathQ: A Neuropathology Report QA Agent
-====================================================
+"""NPathQ: A Neuropathology Report QA Agent
 
-This **fully offline** Gradio application lets you chat with the contents of a
-PDF using any locally available causal‑LM (default: *Meta‑Llama‑3.1‑8B‑Instruct*).
-It is aimed at GPU workstations/clusters where privacy or air‑gap constraints
-rule out cloud APIs.
+This offline Gradio application lets you chat with the contents of a neuropathology
+report PDF using any locally available LLM (default: Llama‑3.1‑8B‑Instruct).
 
 Workflow
 --------
@@ -13,15 +9,15 @@ Workflow
 2. The file is parsed to plain text by `docling`, a unified document understanding
    framework from the Linux Foundation AI & Data ecosystem. It supports page layout,
    OCR, and multiple export formats.
-3. Text is split into *overlapping* chunks (≈1k tokens) – the overlap prevents
-   fuzzy cut‑offs from hiding facts that straddle chunk boundaries – and each
+3. Text is split into *overlapping* chunks (ca. 1k tokens). The overlap prevents
+   fuzzy cut‑offs from hiding facts that straddle chunk boundaries. Each
    chunk is embedded with *all‑MiniLM‑L6‑v2*.
 4. Chunks are stored in a local FAISS index.
 5. A `ConversationalRetrievalChain` feeds the most relevant chunks plus the
    **system prompt** (loaded from *system_prompt.md*) into your chosen LLM.
    The LLM call uses the model's specific chat template via its Hugging Face tokenizer.
    Earlier turns are appended for on‑session memory until the PDF changes.
-6. Answers stream to the chat UI. A static footer provides attribution.
+6. Answers stream to the chat UI.
 """
 
 import argparse
@@ -100,7 +96,7 @@ class ChatTemplatePrompt(StringPromptTemplate):
     _system_prompt: str = PrivateAttr()
     _tokenizer: Any = PrivateAttr()
 
-    def __init__(self, system_prompt: str, tokenizer, **kwargs):  # Added **kwargs
+    def __init__(self, system_prompt: str, tokenizer, **kwargs):
         super().__init__(
             input_variables=self.input_variables, **kwargs
         )

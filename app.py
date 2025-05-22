@@ -15,8 +15,9 @@ Workflow
 4. Chunks are stored in a local FAISS index.
 5. A `ConversationalRetrievalChain` is used. It internally creates a standalone
    question from the conversation history and the new user question. This is done
-   using an `LLMChain` with a highly restrictive prompt to ensure the standalone
-   question is concise and directly usable for retrieval.
+   using a custom `LLMChain` (the `question_generator`) which uses a
+   `ChatPromptTemplate`and a `FirstLineParser` to ensure the standalone question is
+   concise.
 6. The standalone question is used to retrieve relevant document chunks.
 7. These chunks, along with the original conversation history (as a string) and
    the condensed question, are formatted using a custom `ChatTemplatePrompt` that
@@ -40,7 +41,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
 from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import PromptTemplate, StringPromptTemplate
+from langchain_core.prompts import StringPromptTemplate
 from pydantic import PrivateAttr
 from transformers import AutoTokenizer
 
@@ -190,11 +191,9 @@ class ChatTemplatePrompt(StringPromptTemplate):
         return "chat-template-prompt"
 
 
-def qa_chain(vstore, system_prompt_content, llm_instance, tokenizer_instance):
-    # prompt for the final answer
+def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
-    # question-generator chain with its own prompt + parser
     question_generator = LLMChain(
         llm=llm_instance,
         prompt=CONDENSE_PROMPT,
@@ -231,7 +230,7 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     txt = pdf_to_text(Path(pdf_file_obj.name))
     vstore = vector_store(txt)
 
-    # pass the single LLM instance to qa_chain
+    # pass the single LLM instance and tokenizer to qa_chain
     state["chain"] = qa_chain(vstore, SYSTEM_PROMPT, LLM, TOKENIZER)
     state["langchain_history"] = []
     ui_message = [{"role": "system", "content": "PDF parsed. Ask away!"}]

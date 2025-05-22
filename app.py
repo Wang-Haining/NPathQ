@@ -153,12 +153,24 @@ class ChatTemplatePrompt(StringPromptTemplate):
 
 
 def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
-    prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
+    prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance) # Your custom prompt
+
+    # define a stricter condense question prompt
+    _template = """Given the following conversation and a follow up question, 
+    rephrase the follow up question to be a standalone question in English.
+    If the follow up question is already a standalone question, just repeat it.
+
+Chat History:
+{chat_history}
+Follow Up Input: {question}
+Standalone question:"""
+    CONDENSE_QUESTION_PROMPT_CUSTOM = PromptTemplate.from_template(_template)
 
     return ConversationalRetrievalChain.from_llm(
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
         combine_docs_chain_kwargs={"prompt": prompt},
+        condense_question_prompt=CONDENSE_QUESTION_PROMPT_CUSTOM,
         return_source_documents=False,
     )
 

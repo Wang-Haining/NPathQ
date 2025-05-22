@@ -80,10 +80,10 @@ After uploading a report, you can ask questions like:
 
 ```
 .
-├── app.py                 # Main Gradio app entry point
-├── system_prompt.md       # Custom system prompt for LLM
-├── requirements.txt       # Frozen pip dependencies
-└── README.md              # This file
+├── app.py                 # main Gradio app entry point
+├── system_prompt.md       # custom system prompt for LLM
+├── requirements.txt       # frozen pip dependencies
+└── README.md              # this file
 ```
 ---
 

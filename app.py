@@ -26,7 +26,7 @@ Workflow
 
 import argparse
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict, List
 
 import gradio as gr
 import torch
@@ -92,14 +92,15 @@ def vector_store(text: str):
 class ChatTemplatePrompt(StringPromptTemplate):
     """Wrap HF tokenizer.chat_template so LangChain can inject vars."""
 
-    # two variables the chain will pass
-    input_variables = ["context", "question"]
+    # tell Pydantic this is a plain class-level constant, not a field
+    input_variables: ClassVar[List[str]] = ["context", "question"]
 
     def __init__(self, system_prompt: str, tokenizer):
         super().__init__()
         self.system_prompt = system_prompt
         self.tokenizer = tokenizer
 
+    # LangChain calls this at runtime
     def format(self, **kwargs) -> str:
         ctx   = kwargs["context"]
         query = kwargs["question"]
@@ -110,7 +111,6 @@ class ChatTemplatePrompt(StringPromptTemplate):
              "content": f"Based on the following context:\n\n{ctx}\n\n"
                         f"Answer this question:\n{query}"}
         ]
-        # render to final prompt string using HF template
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )

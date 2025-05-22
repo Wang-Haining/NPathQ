@@ -154,32 +154,31 @@ class ChatTemplatePrompt(StringPromptTemplate):
 
 
 def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
+    """
+    Build a ConversationalRetrievalChain that:
+      - uses the same LLM for both question-condensation and final answering
+      - applies a model-specific chat template (ChatTemplatePrompt) for the answer step
+      - stores / retrieves document chunks through a FAISS retriever
+    """
 
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
-    # extremely restrictive condense question prompt
-    _template = """Given the conversation history and the follow up question, rephrase the follow up question to be a standalone question in English.
-The standalone question should be concise and accurately reflect the user's intent based on the follow up question and history.
-If the follow up question is already a standalone question, repeat it exactly.
-**Your entire response MUST be ONLY the standalone question. Do NOT include any preamble, explanation, justification, or any text other than the standalone question itself.
-The question should be a single line of text.**
+    _template = """Given the conversation history and the follow-up question, rephrase
+the follow-up question so it stands alone in English. The result must be concise,
+contain only the question, no preamble or explanation, and fit on a single line.
 
 Chat History:
 {chat_history}
-Follow Up Input: {question}
+Follow-up Input: {question}
 Standalone question:"""
     CONDENSE_QUESTION_PROMPT_CUSTOM = PromptTemplate.from_template(_template)
 
-    # the LLMChain for question_generator will use the main llm_instance
-    question_generator_chain = LLMChain(
-        llm=llm_instance, prompt=CONDENSE_QUESTION_PROMPT_CUSTOM
-    )
-
+    # build the full conversational-retrieval chain
     return ConversationalRetrievalChain.from_llm(
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
+        condense_question_prompt=CONDENSE_QUESTION_PROMPT_CUSTOM,
         combine_docs_chain_kwargs={"prompt": final_answer_prompt},
-        question_generator=question_generator_chain,
         return_source_documents=False,
     )
 

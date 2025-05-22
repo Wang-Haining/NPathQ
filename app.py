@@ -4,98 +4,47 @@ This offline Gradio application lets you chat with the contents of a neuropathol
 report PDF using any locally available LLM (default: Llama‑3.1‑8B‑Instruct).
 
 Workflow
---------
+-------------------
 1. Upload a PDF.
-2. The file is parsed to plain text by `docling`, a unified document understanding
-   framework from the Linux Foundation AI & Data ecosystem. It supports page layout,
-   OCR, and multiple export formats.
-3. Text is split into *overlapping* chunks (ca. 1k tokens). The overlap prevents
-   fuzzy cut‑offs from hiding facts that straddle chunk boundaries. Each
-   chunk is embedded with *all‑MiniLM‑L6‑v2*.
-4. Chunks are stored in a local FAISS index.
-5. A `ConversationalRetrievalChain` is used. Its question generation component is
-   customized by creating a separate `LLMChain` (using a dedicated `ChatPromptTemplate`
-   and `FirstLineParser`) and then manually assigning it to the `question_generator`
-   attribute of the `ConversationalRetrievalChain` instance. This ensures the
-   standalone question for retrieval is concise.
-6. The standalone question is used to retrieve relevant document chunks.
-7. These chunks, along with the original conversation history (as a string) and
-   the condensed question, are formatted using a custom `ChatTemplatePrompt` that
-   applies the model's specific chat template (including a system prompt from
-   *system_prompt.md*). This is fed to the LLM for the final answer.
-8. Answers are shown in the chat UI (currently non-streaming).
+2. The file is parsed to plain text by `docling`.
+3. The full PDF text is stored.
+4. When a user asks a question:
+   a. A prompt is constructed containing:
+      i. The system prompt (from *system_prompt.md*).
+      ii. The full text of the PDF.
+      iii. The recent conversation history (up to 50 rounds).
+      iv. The user's current question.
+   b. This prompt is formatted using the model's chat template and sent to the LLM.
+5. Answers are shown in the chat UI (non-streaming).
+6. A warning is issued if the conversation length approaches 40 rounds.
 """
 
 import argparse
 import traceback
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import gradio as gr
 import torch
 from docling.document_converter import DocumentConverter
-from langchain.chains import ConversationalRetrievalChain, LLMChain
-from langchain.prompts.chat import ChatPromptTemplate
-from langchain.schema import BaseOutputParser, OutputParserException
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
-from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import StringPromptTemplate
-from pydantic import PrivateAttr
 from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
 
-# globals for LLM instance and tokenizer
+# globals for LLM instance, tokenizer, system prompt, and model ID
 LLM = None
 TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
 
-# your new condense prompt structure
-CONDENSE_SYSTEM = """
-You are a retrieval-assistant whose **sole job** is to
-turn a follow-up user message plus the running chat history
-into a single, stand-alone question in natural English.
-
-* why you do this → the vector store needs a succinct query
-  that contains **all** needed context but nothing more.
-* constraints:
-  - must fit on one line
-  - no markdown, no "Assistant:" headers, no explanations
-  - output **only** the question itself
-"""
-
-CONDENSE_HUMAN = """
-Conversation so far:
-{chat_history}
-
-Follow-up question:
-{question}
-
-➡︎ Reformulate the follow-up so it can be asked **alone**:
-"""
-
-CONDENSE_PROMPT = ChatPromptTemplate.from_messages(
-    [("system", CONDENSE_SYSTEM.strip()),
-     ("human",  CONDENSE_HUMAN.strip())]
-)
-
-
-class FirstLineParser(BaseOutputParser):
-    def parse(self, text: str) -> str:
-        text = text.strip()
-        for line in text.splitlines():
-            line = line.strip()
-            if line:
-                print(f"DEBUG FirstLineParser: Returning line: '{line}'")
-                return line
-        print(f"DEBUG FirstLineParser: Received text='{text}', could not parse a valid line.")
-        raise OutputParserException(f"condense LLM returned no usable content. Raw output: '{text[:200]}...'")
+# conversation limits
+MAX_CONVERSATION_ROUNDS = 50
+WARNING_CONVERSATION_ROUNDS = 40
 
 
 def _device() -> str:
+    # this function can indicate general GPU availability if VLLM is using it.
     return (
         "cuda:1"
         if torch.cuda.device_count() > 1
@@ -106,7 +55,7 @@ def _device() -> str:
 def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     """
     Loads the main VLLM instance and the tokenizer.
-    This single LLM instance will be used for both condensing and final answers.
+    Ensures a chat template is available.
     """
     print("Loading VLLM and tokenizer...")
     is_70b = "70b" in model_id.lower()
@@ -120,6 +69,7 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
         tensor_parallel_size=tensor_parallel_size,
         enforce_eager=enforce_eager,
         dtype="bfloat16",
+        gpu_memory_utilization=0.90,
         temperature=(
             cli_args.temperature
             if cli_args and hasattr(cli_args, "temperature")
@@ -129,98 +79,96 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     )
     print("VLLM loaded.")
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    if tokenizer.chat_template is None:
-        print(
-            f"WARNING: Tokenizer for {model_id} does not have a chat_template defined "
-            f"in its config. The model may not behave as expected. Falling back to "
-            f"basic concatenation."
-        )
-    print("Tokenizer loaded.")
+
+    if tokenizer.chat_template:
+        print(f"Tokenizer for {model_id} loaded with its own chat_template from config.")
+    elif hasattr(tokenizer, 'default_chat_template') and tokenizer.default_chat_template:
+        print(f"WARNING: Tokenizer for {model_id} did not have a chat_template in its config. "
+              f"Using its `default_chat_template` provided by the transformers library.")
+        tokenizer.chat_template = tokenizer.default_chat_template
+    else:
+        raise ValueError('Template Error.')
+
+    print("Tokenizer loaded and chat template handling complete.")
     return llm, tokenizer
 
 
 def pdf_to_text(pdf_path: Path) -> str:
-    return DocumentConverter().convert(str(pdf_path)).document.export_to_text()
+    print(f"Parsing PDF: {pdf_path}")
+    try:
+        text = DocumentConverter().convert(str(pdf_path)).document.export_to_text()
+        print(f"PDF parsed successfully. Text length: {len(text)} characters.")
+        return text
+    except Exception as e:
+        print(f"Error parsing PDF {pdf_path}: {e}")
+        print(traceback.format_exc())
+        raise gr.Error(f"Failed to parse PDF: {e}")
 
 
-def vector_store(text: str):
-    chunks = RecursiveCharacterTextSplitter(
-        chunk_size=1024, chunk_overlap=100
-    ).create_documents([text])
-    embed = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": _device()},
+def format_llm_prompt(
+    system_prompt_str: str,
+    pdf_content_str: str,
+    history_tuples: List[Tuple[str, str]],
+    current_question_str: str,
+    tokenizer_instance: Any,
+) -> str:
+    """
+    Formats the prompt for the LLM using the tokenizer's chat template.
+    The PDF content and conversation history are embedded within a single user message.
+    """
+    messages = [{"role": "system", "content": system_prompt_str}]
+
+    user_message_content_parts = []
+
+    # 1. PDF Content
+    user_message_content_parts.append(
+        f"**Full Neuropathology Report Content:**\n{pdf_content_str}"
     )
-    return FAISS.from_documents(chunks, embed)
 
-
-class ChatTemplatePrompt(StringPromptTemplate):
-    input_variables: ClassVar[List[str]] = ["context", "question", "chat_history"]
-    _system_prompt: str = PrivateAttr()
-    _tokenizer: Any = PrivateAttr()
-
-    def __init__(self, system_prompt: str, tokenizer, **kwargs):
-        super().__init__(input_variables=self.input_variables, **kwargs)
-        self._system_prompt = system_prompt
-        self._tokenizer = tokenizer
-
-    def format(self, **kwargs) -> str:
-        ctx = kwargs["context"]
-        query = kwargs["question"]
-        chat_history_str = kwargs.get("chat_history", "")
-        user_message_content_parts = []
-        if chat_history_str and chat_history_str.strip():
-            user_message_content_parts.append(
-                f"Here is the conversation history so far:\n{chat_history_str}\n---"
-            )
+    # 2. conversation History (if any)
+    # use only the last MAX_CONVERSATION_ROUNDS from history_tuples
+    if history_tuples:
+        relevant_history = history_tuples[-MAX_CONVERSATION_ROUNDS:]
+        history_block_parts = []
+        for user_msg, assistant_msg in relevant_history:
+            history_block_parts.append(f"User: {user_msg}")
+            history_block_parts.append(f"Assistant: {assistant_msg}")
         user_message_content_parts.append(
-            f"Based on the following context:\n\n{ctx}\n\n"
-            f"Answer this question:\n{query}"
+            f"**Conversation History (most recent {len(relevant_history)} turns):**\n{'\n'.join(history_block_parts)}"
         )
-        full_user_content = "\n\n".join(user_message_content_parts)
-        messages = [
-            {"role": "system", "content": self._system_prompt},
-            {"role": "user", "content": full_user_content},
-        ]
-        formatted_prompt_str = self._tokenizer.apply_chat_template(
+
+    # 3. current Question
+    user_message_content_parts.append(
+        f"**Current Question (based on the report and history):**\n{current_question_str}"
+    )
+
+    full_user_content = "\n\n---\n\n".join(user_message_content_parts)
+    messages.append({"role": "user", "content": full_user_content})
+
+    try:
+        formatted_prompt = tokenizer_instance.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        print("\n---- DEBUG: ChatTemplatePrompt.format() - PROMPT TO TOKENIZER ----")
-        print(f"Raw condensed question received by ChatTemplatePrompt: '{query}'")
-        print(formatted_prompt_str)
-        print("------------------------------------------------------------------\n")
-        return formatted_prompt_str
+    except Exception as e:
+        print(f"Error applying chat template: {e}")
+        # fallback for very basic tokenizers if template is broken or missing despite checks
+        if messages[0]['role'] == 'system':
+            formatted_prompt = messages[0]['content'] + "\n" + messages[1]['content']
+        else:
+            formatted_prompt = messages[0]['content']
+        print("Warning: Using basic concatenation for prompt due to template error.")
 
-    @property
-    def _prompt_type(self) -> str:
-        return "chat-template-prompt"
 
-
-def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
-    """Create a ConversationalRetrievalChain with custom question generation."""
-    final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
-
-    # create the question generator chain separately
-    question_generator_custom_chain = LLMChain( # Renamed variable for clarity
-        llm=llm_instance,
-        prompt=CONDENSE_PROMPT,
-        output_parser=FirstLineParser(),
-    )
-
-    # create the chain without conflicting parameters for question generation initially
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=llm_instance,
-        retriever=vstore.as_retriever(search_kwargs={"k": 4}),
-        combine_docs_chain_kwargs={"prompt": final_answer_prompt},
-        return_source_documents=False,
-        # deliberately omit question_generator and condense_question_prompt here
-        # so .from_llm uses its default internal setup for question_generator
-    )
-
-    # manually set the question generator to use our custom one, overwriting the default
-    chain.question_generator = question_generator_custom_chain
-
-    return chain
+    print("\n---- DEBUG: format_llm_prompt - PROMPT TO TOKENIZER (STRUCTURE) ----")
+    print(f"System Prompt: {messages[0]['content'][:200]}...")
+    if len(messages) > 1:
+         print(f"User Content (start): {messages[1]['content'][:300]}...")
+         print(f"User Content (end): ...{messages[1]['content'][-300:]}")
+    print("--- Generated Prompt String (first 300 chars) ---")
+    print(formatted_prompt[:300])
+    print(f"--- Generated Prompt String Length: {len(formatted_prompt)} ---")
+    print("------------------------------------------------------------------\n")
+    return formatted_prompt
 
 
 def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
@@ -229,24 +177,18 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
         raise gr.Error("Please upload a PDF first.")
 
     missing = []
-    if LLM is None:
-        missing.append("LLM")
-    if TOKENIZER is None:
-        missing.append("Tokenizer")
-    if SYSTEM_PROMPT is None:
-        missing.append("System Prompt")
-
+    if LLM is None: missing.append("LLM")
+    if TOKENIZER is None: missing.append("Tokenizer")
+    if SYSTEM_PROMPT is None: missing.append("System Prompt")
     if missing:
         raise gr.Error(
-            f"{', '.join(missing)} not initialized. Please ensure system_prompt.md exists and restart the application."
+            f"{', '.join(missing)} not initialized. Please ensure system_prompt.md exists and restart."
         )
 
     txt = pdf_to_text(Path(pdf_file_obj.name))
-    vstore = vector_store(txt)
-
-    state["chain"] = qa_chain(vstore, SYSTEM_PROMPT, LLM, TOKENIZER)
-    state["langchain_history"] = []
-    ui_message = [{"role": "system", "content": "PDF parsed. Ask away!"}]
+    state["pdf_text"] = txt
+    state["conversation_history"] = [] # Reset history for the new PDF
+    ui_message = [{"role": "system", "content": "PDF parsed. You can now ask questions about its content."}]
     state["ui_messages"] = ui_message
 
     return (
@@ -261,86 +203,68 @@ def answer(msg: str, state: Dict[str, Any]):
         yield state.get("ui_messages", []), state
         return
 
-    chain = state.get("chain")
-    if not chain:
+    pdf_text = state.get("pdf_text")
+    if not pdf_text:
         current_ui_messages = state.get("ui_messages", []).copy()
-        if (
-            not current_ui_messages
-            or current_ui_messages[-1].get("content")
-            != "🔄 Still parsing the PDF or PDF not yet uploaded. Please wait or upload a PDF."
-        ):
+        if not current_ui_messages or current_ui_messages[-1].get("content") != "Please upload a PDF first.":
             current_ui_messages.append(
-                {
-                    "role": "assistant",
-                    "content": "🔄 Still parsing the PDF or PDF not yet uploaded. Please wait or upload a PDF.",
-                }
+                {"role": "assistant", "content": "Please upload a PDF first."}
             )
         yield current_ui_messages, state
         return
 
     ui_messages = state.get("ui_messages", []).copy()
-    langchain_history = state.get("langchain_history", []).copy()
+    conversation_history_for_prompt = state.get("conversation_history", []).copy()
 
     ui_messages.append({"role": "user", "content": msg})
     ui_messages.append({"role": "assistant", "content": "🤔 Thinking..."})
     yield ui_messages, state
 
-    current_assistant_response = ""
+    llm_response_text = ""
     try:
-        # debug: check if we can access the question generator and its output
-        if hasattr(chain, 'question_generator') and chain.question_generator:
-            try:
-                # note: LLMChain's output is a dict with 'text' key if output_parser is not str
-                # if FirstLineParser returns str, then condensed_q_result will be str
-                # for LLMChain, the input keys must match the prompt's input_variables
-                # CONDENSE_PROMPT expects "question" and "chat_history"
-                invoke_payload = {"question": msg, "chat_history": langchain_history}
-                print(f"DEBUG: Invoking question_generator with: {invoke_payload}")
-                condensed_q_result = chain.question_generator.invoke(invoke_payload)
-
-                print(f"DEBUG: Type of condensed_q_result: {type(condensed_q_result)}")
-                if isinstance(condensed_q_result, dict):
-                    actual_condensed_question = condensed_q_result.get('text', str(condensed_q_result))
-                    print(f"DEBUG: Condensed question from question_generator (dict): '{actual_condensed_question}'")
-                else: # should be a string if FirstLineParser worked
-                    actual_condensed_question = str(condensed_q_result)
-                    print(f"DEBUG: Condensed question from question_generator (direct): '{actual_condensed_question}'")
-
-            except Exception as debug_e:
-                print(f"DEBUG: Error during question_generator invocation: {debug_e}")
-                print(traceback.format_exc())
-
-
-        response_payload = chain.invoke(
-            {"question": msg, "chat_history": langchain_history}
+        prompt_str = format_llm_prompt(
+            SYSTEM_PROMPT,
+            pdf_text,
+            conversation_history_for_prompt,
+            msg,
+            TOKENIZER,
         )
-        current_assistant_response = response_payload.get("answer")
-        if current_assistant_response is None:
-            if isinstance(response_payload, str):
-                current_assistant_response = response_payload
-            elif isinstance(response_payload, dict) and not response_payload:
-                current_assistant_response = (
-                    "Received an empty response from the assistant."
-                )
-            else:
-                error_detail = f"Error: Could not extract answer. Response payload: {str(response_payload)[:200]}"
-                print(f"Unexpected response payload structure: {response_payload}")
-                current_assistant_response = error_detail
+        # VLLM's invoke method directly takes the prompt string
+        llm_response_text = LLM.invoke(prompt_str)
+        if not llm_response_text or not llm_response_text.strip():
+            llm_response_text = "I received an empty response from the model. Please try rephrasing your question."
+
     except Exception as e:
         print(f"Error during LLM invocation: {e}")
         print(traceback.format_exc())
-        current_assistant_response = (
-            "Sorry, an error occurred while generating the response."
+        llm_response_text = "Sorry, an error occurred while generating the response. Please check the console for details."
+
+    # add conversation length warning if needed
+    warning_message = ""
+    num_rounds_completed = len(conversation_history_for_prompt) # Rounds *before* this one
+
+    if num_rounds_completed + 1 >= MAX_CONVERSATION_ROUNDS:
+        warning_message = (
+            f"\n\n---\n**SYSTEM WARNING:** Conversation has reached {num_rounds_completed + 1} rounds "
+            f"(max {MAX_CONVERSATION_ROUNDS}). To ensure optimal performance and context accuracy, "
+            "please **reset the chat and PDF** to start a new session for further questions."
+        )
+    elif num_rounds_completed + 1 >= WARNING_CONVERSATION_ROUNDS:
+        warning_message = (
+            f"\n\n---\n**SYSTEM INFO:** Conversation at {num_rounds_completed + 1} rounds. "
+            f"The context includes up to {MAX_CONVERSATION_ROUNDS} rounds. For very long discussions, "
+            "consider starting a new session by resetting the chat and PDF."
         )
 
-    if ui_messages and ui_messages[-1]["role"] == "assistant":
-        ui_messages[-1]["content"] = current_assistant_response
-    else:
-        ui_messages.append({"role": "assistant", "content": current_assistant_response})
+    final_assistant_response = llm_response_text.strip() + warning_message
 
-    if not isinstance(current_assistant_response, str):
-        current_assistant_response = str(current_assistant_response)
-    state["langchain_history"].append((msg, current_assistant_response))
+    if ui_messages and ui_messages[-1]["role"] == "assistant":
+        ui_messages[-1]["content"] = final_assistant_response
+    else: # Should not happen if "Thinking..." was appended
+        ui_messages.append({"role": "assistant", "content": final_assistant_response})
+
+    # Update history *after* getting the response for *this* turn
+    state["conversation_history"].append((msg, llm_response_text.strip())) # Store raw response
     state["ui_messages"] = ui_messages
     yield ui_messages, state
 
@@ -349,28 +273,25 @@ def reset_session(state: Dict[str, Any]):
     initial_ui_messages = [
         {"role": "system", "content": "Session reset. Please upload a PDF to begin."}
     ]
-    state["chain"] = None
-    state["langchain_history"] = []
+    state["pdf_text"] = None
+    state["conversation_history"] = []
     state["ui_messages"] = initial_ui_messages
-    return initial_ui_messages, state
+    # also reset the textbox
+    return initial_ui_messages, state, gr.update(value="", placeholder="Upload a PDF to begin asking questions.", interactive=False)
 
 
 CUSTOM_CSS = """
 body {font-family: 'Inter', sans-serif;}
-/* Titles */
 #main-title-md h1 {text-align: center !important; font-size: 2.8em !important; margin-bottom: 0.1em !important; color: #333 !important;}
 #sub-title-md p {text-align: center !important; font-size: 1.3em !important; color: #555 !important; margin-top: 0 !important; margin-bottom: 2em !important;}
-/* Chat alignment */
 .gradio-chatbot > .wrap {display: flex; flex-direction: column;}
 .gradio-chatbot .message-wrap[data-testid="user"] {align-self: flex-start !important;}
 .gradio-chatbot .message-wrap[data-testid="user"] > div.message {background-color: #DCF8C6 !important; color: #000 !important; max-width: 70% !important; border-radius: 10px !important;}
 .gradio-chatbot .message-wrap[data-testid="assistant"] {align-self: flex-end !important;}
 .gradio-chatbot .message-wrap[data-testid="assistant"] > div.message {background-color: #ECE5DD !important; color: #000 !important; max-width: 70% !important; border-radius: 10px !important;}
-/* Footer */
 #footer-info-md p {font-size: 0.8em !important; color: #888 !important; text-align: center !important; margin-top: 25px !important; padding: 15px !important; border-top: 1px solid #eee !important;}
 #footer-info-md a {color: #007bff !important; text-decoration: none !important;}
 #footer-info-md a:hover {text-decoration: underline !important;}
-/* Device/Model info */
 #device-model-info-md p {font-size: 0.75em !important; color: #aaa !important; text-align: center !important; margin-top: 5px !important;}
 """
 
@@ -385,32 +306,36 @@ def build_ui(port: int, share_the_ui: bool):
     global MODEL_ID
     with gr.Blocks(css=CUSTOM_CSS) as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
-        gr.Markdown("The First Neuropathology Report QA Agent", elem_id="sub-title-md")
+        gr.Markdown("Simplified Neuropathology Report QA Agent", elem_id="sub-title-md") # Updated subtitle
+
+        # initial state values
+        initial_ui_messages_val = [{"role": "system", "content": "Please upload a PDF to begin."}]
         app_state = gr.State(
             {
-                "chain": None,
-                "langchain_history": [],
-                "ui_messages": [
-                    {"role": "system", "content": "Please upload a PDF to begin."}
-                ],
+                "pdf_text": None,
+                "conversation_history": [],
+                "ui_messages": initial_ui_messages_val,
             }
         )
         with gr.Row():
             pdf_file = gr.File(label="Upload PDF", file_types=[".pdf"])
             reset_btn = gr.Button("Reset Chat & PDF")
+
         chat = gr.Chatbot(
-            value=[{"role": "system", "content": "Please upload a PDF to begin."}],
+            value=initial_ui_messages_val,
             label=f"{AGENT_NAME} Chat",
-            height=480,
+            height=500, #
             show_copy_button=True,
+            bubble_full_width=False, # For better message alignment
             layout="panel",
-            type="messages",
         )
+
+
         box = gr.Textbox(
             lines=1,
             placeholder="Upload a PDF to begin asking questions.",
             label="Your Question",
-            scale=7,
+            scale=7, #
             interactive=False,
         )
         pdf_file.change(
@@ -420,20 +345,18 @@ def build_ui(port: int, share_the_ui: bool):
         )
 
         reset_btn.click(
-            reset_session, inputs=[app_state], outputs=[chat, app_state]
-        ).then(
-            lambda: gr.update(
-                interactive=False, placeholder="Upload a PDF to begin asking questions."
-            ),
-            inputs=None,
-            outputs=[box],
+            reset_session,
+            inputs=[app_state],
+            outputs=[chat, app_state, box] # reset_session now also outputs for the textbox
         )
+        # .then removed as reset_session now handles the textbox update.
 
         box.submit(fn=answer, inputs=[box, app_state], outputs=[chat, app_state])
-        box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False)
+        box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False) # Clears textbox after submit
+
         gr.Markdown(FOOTER_TEXT, elem_id="footer-info-md")
         gr.Markdown(
-            f"<small>Device: {_device()} | LLM: {MODEL_ID}</small>",
+            f"<small>Device: {_device()} | LLM: {MODEL_ID} | Max Rounds: {MAX_CONVERSATION_ROUNDS}</small>",
             elem_id="device-model-info-md",
         )
     print(f"Starting {AGENT_NAME} on http://0.0.0.0:{port}")
@@ -442,7 +365,7 @@ def build_ui(port: int, share_the_ui: bool):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description=f"{AGENT_NAME}: PDF QA with Local LLMs"
+        description=f"{AGENT_NAME}: Simplified PDF QA with Local LLMs"
     )
     parser.add_argument(
         "--model",
@@ -460,13 +383,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=4096,
+        default=4096, # Increased from original 2048, good for comprehensive answers
         help="Max new tokens for the main LLM generation.",
     )
     parser.add_argument(
-        "--temperature", type=float, default=0.7, help="Temperature for the LLM."
+        "--temperature", type=float, default=0.6, help="Temperature for the LLM." # Slightly lower default
     )
-    parser.add_argument("--top_p", type=float, default=0.95, help="Top_p for the LLM.")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top_p for the LLM.") # Slightly lower default
     parser.add_argument(
         "--share",
         action="store_true",
@@ -478,7 +401,13 @@ if __name__ == "__main__":
 
     system_prompt_path = Path(args.prompt)
     if not system_prompt_path.exists():
-        print(f"ERROR: System prompt file '{system_prompt_path}' not found.")
+        print(f"ERROR: System prompt file '{system_prompt_path}' not found. Please create it.")
+        print("Example system_prompt.md content:")
+        print("---")
+        print("You are NPathQ, a specialized AI assistant for Neuropathology Report Question Answering.")
+        print("Carefully analyze the provided neuropathology report content and the conversation history to answer the user's questions accurately and concisely.")
+        print("If the information is not in the report, state that explicitly.")
+        print("---")
         exit(1)
     try:
         SYSTEM_PROMPT = system_prompt_path.read_text().strip()
@@ -497,12 +426,10 @@ if __name__ == "__main__":
 
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
         missing_init = []
-        if LLM is None:
-            missing_init.append("LLM")
-        if TOKENIZER is None:
-            missing_init.append("Tokenizer")
-        if SYSTEM_PROMPT is None:
-            missing_init.append("SYSTEM_PROMPT text")
+        if LLM is None: missing_init.append("LLM")
+        if TOKENIZER is None: missing_init.append("Tokenizer")
+        if SYSTEM_PROMPT is None: missing_init.append("SYSTEM_PROMPT text") # Should be caught by earlier checks
+        # This specific error condition might be redundant due to earlier exits, but good as a safeguard.
         raise RuntimeError(
             f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting."
         )

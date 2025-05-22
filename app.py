@@ -26,7 +26,7 @@ Workflow
 """
 
 import argparse
-import traceback  # i like this import here
+import traceback
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List
 
@@ -34,12 +34,14 @@ import gradio as gr
 import torch
 from docling.document_converter import DocumentConverter
 from langchain.chains import ConversationalRetrievalChain, LLMChain
+from langchain.prompts.chat import ChatPromptTemplate
+from langchain.schema import BaseOutputParser, OutputParserException
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate, StringPromptTemplate
-from pydantic import PrivateAttr  # and this one too
+from pydantic import PrivateAttr
 from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
@@ -49,8 +51,43 @@ LLM = None
 TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
-# CONDENSE_LLM was removed as we're using one LLM instance
 
+CONDENSE_SYSTEM = """
+You are a retrieval-assistant whose **sole job** is to
+turn a follow-up user message plus the running chat history
+into a single, stand-alone question in natural English.
+
+* why you do this → the vector store needs a succinct query
+  that contains **all** needed context but nothing more.
+* constraints →
+  - must fit on one line
+  - no markdown, no “Assistant:” headers, no explanations
+  - output **only** the question itself
+"""
+
+CONDENSE_HUMAN = """
+Conversation so far:
+{chat_history}
+
+Follow-up question:
+{question}
+
+➡︎ Reformulate the follow-up so it can be asked **alone**:
+"""
+
+CONDENSE_PROMPT = ChatPromptTemplate.from_messages(
+    [("system", CONDENSE_SYSTEM.strip()),
+     ("human",  CONDENSE_HUMAN.strip())]
+)
+
+
+class FirstLineParser(BaseOutputParser):
+    def parse(self, text: str) -> str:
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                return line
+        raise OutputParserException("condense LLM returned no content")
 
 def _device() -> str:
     return (
@@ -153,31 +190,21 @@ class ChatTemplatePrompt(StringPromptTemplate):
         return "chat-template-prompt"
 
 
-def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
-    """
-    Build a ConversationalRetrievalChain that:
-      - uses the same LLM for both question-condensation and final answering
-      - applies a model-specific chat template (ChatTemplatePrompt) for the answer step
-      - stores / retrieves document chunks through a FAISS retriever
-    """
-
+def qa_chain(vstore, system_prompt_content, llm_instance, tokenizer_instance):
+    # prompt for the final answer
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
-    _template = """Given the conversation history and the follow-up question, rephrase
-the follow-up question so it stands alone in English. The result must be concise,
-contain only the question, no preamble or explanation, and fit on a single line.
+    # question-generator chain with its own prompt + parser
+    question_generator = LLMChain(
+        llm=llm_instance,
+        prompt=CONDENSE_PROMPT,
+        output_parser=FirstLineParser(),
+    )
 
-Chat History:
-{chat_history}
-Follow-up Input: {question}
-Standalone question:"""
-    CONDENSE_QUESTION_PROMPT_CUSTOM = PromptTemplate.from_template(_template)
-
-    # build the full conversational-retrieval chain
     return ConversationalRetrievalChain.from_llm(
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
-        condense_question_prompt=CONDENSE_QUESTION_PROMPT_CUSTOM,
+        question_generator=question_generator,
         combine_docs_chain_kwargs={"prompt": final_answer_prompt},
         return_source_documents=False,
     )

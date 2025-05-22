@@ -13,15 +13,20 @@ Workflow
    fuzzy cut‑offs from hiding facts that straddle chunk boundaries. Each
    chunk is embedded with *all‑MiniLM‑L6‑v2*.
 4. Chunks are stored in a local FAISS index.
-5. A `ConversationalRetrievalChain` feeds the most relevant chunks plus the
-   **system prompt** (loaded from *system_prompt.md*) into your chosen LLM.
-   The LLM call uses the model's specific chat template via its Hugging Face tokenizer.
-   Earlier turns are appended for on‑session memory until the PDF changes.
-6. Answers stream to the chat UI.
+5. A `ConversationalRetrievalChain` is used. It internally creates a standalone
+   question from the conversation history and the new user question. This is done
+   using an `LLMChain` with a highly restrictive prompt to ensure the standalone
+   question is concise and directly usable for retrieval.
+6. The standalone question is used to retrieve relevant document chunks.
+7. These chunks, along with the original conversation history (as a string) and
+   the condensed question, are formatted using a custom `ChatTemplatePrompt` that
+   applies the model's specific chat template (including a system prompt from
+   *system_prompt.md*). This is fed to the LLM for the final answer.
+8. Answers are shown in the chat UI (currently non-streaming).
 """
 
 import argparse
-import traceback
+import traceback  # i like this import here
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List
 
@@ -34,17 +39,17 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate, StringPromptTemplate
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr  # and this one too
 from transformers import AutoTokenizer
 
 AGENT_NAME = "NPathQ"
 
-
+# globals for LLM instance and tokenizer
 LLM = None
-CONDENSE_LLM = None
 TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
+# CONDENSE_LLM was removed as we're using one LLM instance
 
 
 def _device() -> str:
@@ -57,8 +62,8 @@ def _device() -> str:
 
 def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     """
-    Loads the main VLLM instance and the tokenizer.
-    This single LLM instance will be used for both condensing and final answers.
+    loads the main VLLM instance and the tokenizer.
+    this single LLM instance will be used for both condensing and final answers.
     """
     print("Loading VLLM and tokenizer...")
     is_70b = "70b" in model_id.lower()
@@ -137,6 +142,7 @@ class ChatTemplatePrompt(StringPromptTemplate):
         formatted_prompt_str = self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        # keeping this debug active for now
         print("\n---- DEBUG: ChatTemplatePrompt.format() - PROMPT TO TOKENIZER ----")
         print(formatted_prompt_str)
         print("------------------------------------------------------------------\n")
@@ -151,6 +157,7 @@ def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instanc
 
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
+    # extremely restrictive condense question prompt
     _template = """Given the conversation history and the follow up question, rephrase the follow up question to be a standalone question in English.
 The standalone question should be concise and accurately reflect the user's intent based on the follow up question and history.
 If the follow up question is already a standalone question, repeat it exactly.
@@ -163,6 +170,7 @@ Follow Up Input: {question}
 Standalone question:"""
     CONDENSE_QUESTION_PROMPT_CUSTOM = PromptTemplate.from_template(_template)
 
+    # the LLMChain for question_generator will use the main llm_instance
     question_generator_chain = LLMChain(
         llm=llm_instance, prompt=CONDENSE_QUESTION_PROMPT_CUSTOM
     )
@@ -171,7 +179,7 @@ Standalone question:"""
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
         combine_docs_chain_kwargs={"prompt": final_answer_prompt},
-        question_generator=question_generator_chain, # This is correct
+        question_generator=question_generator_chain,
         return_source_documents=False,
     )
 
@@ -258,7 +266,7 @@ def answer(msg: str, state: Dict[str, Any]):
                 current_assistant_response = error_detail
     except Exception as e:
         print(f"Error during LLM invocation: {e}")
-        print(traceback.format_exc())
+        print(traceback.format_exc())  # i like this too
         current_assistant_response = (
             "Sorry, an error occurred while generating the response."
         )
@@ -311,7 +319,7 @@ FOOTER_TEXT = (
 )
 
 
-def build_ui(port: int, share_the_ui: bool):  # Renamed 'share' to 'share_the_ui'
+def build_ui(port: int, share_the_ui: bool):
     global MODEL_ID
     with gr.Blocks(css=CUSTOM_CSS) as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
@@ -390,7 +398,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=4096,
+        default=4096,  # my preferred default
         help="Max new tokens for the main LLM generation.",
     )
     parser.add_argument(
@@ -398,7 +406,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--top_p", type=float, default=0.95, help="Top_p for the LLM.")
     parser.add_argument(
-        "--share",
+        "--share",  # my preferred name for the cli arg
         action="store_true",
         help="Enable external access to the app via public Gradio link.",
     )

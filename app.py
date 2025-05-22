@@ -52,9 +52,8 @@ LLM = None
 TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
-# CONDENSE_LLM was removed as we're using one LLM instance
 
-# your new condense prompt structure
+
 CONDENSE_SYSTEM = """
 You are a retrieval-assistant whose **sole job** is to
 turn a follow-up user message plus the running chat history
@@ -62,9 +61,9 @@ into a single, stand-alone question in natural English.
 
 * why you do this → the vector store needs a succinct query
   that contains **all** needed context but nothing more.
-* constraints →
+* constraints:
   - must fit on one line
-  - no markdown, no “Assistant:” headers, no explanations
+  - no markdown, no "Assistant:" headers, no explanations
   - output **only** the question itself
 """
 
@@ -84,17 +83,14 @@ CONDENSE_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
-class FirstLineParser(BaseOutputParser): # your parser
+class FirstLineParser(BaseOutputParser):
     def parse(self, text: str) -> str:
-        text = text.strip() # Strip leading/trailing whitespace from the whole text first
+        text = text.strip()
         for line in text.splitlines():
             line = line.strip()
             if line:
                 return line
-        # If LLM returns only whitespace or empty string after stripping, it's effectively no content.
-        # It might also return "None" or "null" as a string, handle if necessary.
-        # For now, raising an exception if no non-empty line is found.
-        # print(f"DEBUG FirstLineParser: Received text='{text}', could not parse a valid line.") # Optional debug
+
         raise OutputParserException(f"condense LLM returned no usable content. Raw output: '{text[:200]}...'")
 
 
@@ -108,8 +104,8 @@ def _device() -> str:
 
 def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     """
-    loads the main VLLM instance and the tokenizer.
-    this single LLM instance will be used for both condensing and final answers.
+    Loads the main VLLM instance and the tokenizer.
+    This single LLM instance will be used for both condensing and final answers.
     """
     print("Loading VLLM and tokenizer...")
     is_70b = "70b" in model_id.lower()
@@ -169,7 +165,7 @@ class ChatTemplatePrompt(StringPromptTemplate):
 
     def format(self, **kwargs) -> str:
         ctx = kwargs["context"]
-        query = kwargs["question"] # This should be the clean, condensed question
+        query = kwargs["question"]
         chat_history_str = kwargs.get("chat_history", "")
         user_message_content_parts = []
         if chat_history_str and chat_history_str.strip():
@@ -188,9 +184,9 @@ class ChatTemplatePrompt(StringPromptTemplate):
         formatted_prompt_str = self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        # keeping this debug active for now
+        # debug
         print("\n---- DEBUG: ChatTemplatePrompt.format() - PROMPT TO TOKENIZER ----")
-        print(f"Raw condensed question received by ChatTemplatePrompt: '{query}'") # Added more specific debug
+        print(f"Raw condensed question received by ChatTemplatePrompt: '{query}'")
         print(formatted_prompt_str)
         print("------------------------------------------------------------------\n")
         return formatted_prompt_str
@@ -278,12 +274,11 @@ def answer(msg: str, state: Dict[str, Any]):
 
     current_assistant_response = ""
     try:
-        # For debugging the output of question_generator directly:
-        # condensed_q_result = chain.question_generator.invoke({"question": msg, "chat_history": langchain_history})
-        # print(f"DEBUG: Condensed question from question_generator: '{condensed_q_result}'")
-        # if isinstance(condensed_q_result, dict):
-        #    print(f"DEBUG: Condensed question (dict text): '{condensed_q_result.get('text')}'")
-
+        # debug
+        condensed_q_result = chain.question_generator.invoke({"question": msg, "chat_history": langchain_history})
+        print(f"DEBUG: Condensed question from question_generator: '{condensed_q_result}'")
+        if isinstance(condensed_q_result, dict):
+           print(f"DEBUG: Condensed question (dict text): '{condensed_q_result.get('text')}'")
 
         response_payload = chain.invoke(
             {"question": msg, "chat_history": langchain_history}

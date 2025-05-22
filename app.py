@@ -3,8 +3,8 @@
 This offline Gradio application lets you chat with the contents of a neuropathology
 report PDF using any locally available LLM (default: Llama‑3.1‑8B‑Instruct).
 
-Simplified Workflow
--------------------
+Workflow:
+
 1. Upload a PDF.
 2. The file is parsed to plain text by `docling`.
 3. The full PDF text is stored.
@@ -12,11 +12,11 @@ Simplified Workflow
    a. A prompt is constructed containing:
       i. The system prompt (from *system_prompt.md*).
       ii. The full text of the PDF.
-      iii. The recent conversation history (up to 50 rounds).
+      iii. The most recent conversation history (up to MAX_CONVERSATION_ROUNDS).
       iv. The user's current question.
    b. This prompt is formatted using the model's chat template and sent to the LLM.
 5. Answers are shown in the chat UI (non-streaming).
-6. A warning is issued if the conversation length approaches 40 rounds.
+6. The conversation history included in the prompt is capped at MAX_CONVERSATION_ROUNDS.
 """
 
 import argparse
@@ -40,7 +40,7 @@ MODEL_ID = None
 
 # conversation limits
 MAX_CONVERSATION_ROUNDS = 50
-WARNING_CONVERSATION_ROUNDS = 40
+# WARNING_CONVERSATION_ROUNDS = 40 # Removed
 
 
 def _device() -> str:
@@ -54,7 +54,7 @@ def _device() -> str:
 def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     """
     Loads the main VLLM instance and the tokenizer.
-    Ensures a chat template is available.
+    Ensures a chat template is available or raises an error.
     """
     print("Loading VLLM and tokenizer...")
     is_70b = "70b" in model_id.lower()
@@ -82,28 +82,20 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     if tokenizer.chat_template:
         print(f"Tokenizer for {model_id} loaded with its own chat_template from config.")
     elif hasattr(tokenizer, 'default_chat_template') and tokenizer.default_chat_template:
-        print(f"WARNING: Tokenizer for {model_id} did not have a chat_template in its config. "
+        print(f"INFO: Tokenizer for {model_id} did not have a chat_template in its config. "
               f"Using its `default_chat_template` provided by the transformers library.")
-        tokenizer.chat_template = tokenizer.default_chat_template
+        tokenizer.chat_template = tokenizer.default_chat_template # Explicitly set it for consistency
     else:
-        llama3_template_str = (
-            "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}"
-            "{{ bos_token }}"
-            "{% if system_message %}{{ '<|start_header_id|>system<|end_header_id|>\n\n' + system_message + '<|eot_id|>' }}{% endif %}"
-            "{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}"
-            "{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' }}{% endfor %}"
-            "{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
+        # If no template is found from config or library defaults, raise an error.
+        error_message = (
+            f"CRITICAL ERROR: Tokenizer for '{model_id}' does not have a `chat_template` in its "
+            f"config, nor a `default_chat_template` provided by the transformers library. "
+            f"NPathQ requires a valid chat template to function correctly. "
+            f"Please ensure the model's tokenizer_config.json includes a chat_template, "
+            f"or use a model for which the transformers library provides a default."
         )
-        if "llama-3" in model_id.lower() or "llama3" in model_id.lower():
-            tokenizer.chat_template = llama3_template_str
-            print(f"WARNING: Tokenizer for {model_id} had no chat_template in config and no library default. "
-                  f"Applied a hardcoded Llama-3 template as a fallback. This is not ideal.")
-        else:
-            print(
-                f"CRITICAL WARNING: Tokenizer for {model_id} does not have a `chat_template` in its config, "
-                f"nor a `default_chat_template` from the library, and no known fallback was applied. "
-                f"Chat formatting will likely be incorrect or fail."
-            )
+        print(error_message)
+        raise ValueError(error_message)
 
     print("Tokenizer loaded and chat template handling complete.")
     return llm, tokenizer
@@ -167,29 +159,15 @@ def format_llm_prompt(
     messages.append({"role": "user", "content": full_user_content})
 
     try:
-        if tokenizer_instance.chat_template is None and not (hasattr(tokenizer_instance, 'default_chat_template') and tokenizer_instance.default_chat_template):
-            print("CRITICAL ERROR in format_llm_prompt: Tokenizer has no chat_template and no default_chat_template. Prompt formatting will likely fail or be incorrect.")
-            if messages[0]['role'] == 'system':
-                formatted_prompt = messages[0]['content'] + "\n\n" + messages[1]['content']
-            else:
-                formatted_prompt = messages[0]['content']
-            print("Warning: Using extremely basic concatenation for prompt due to missing template in tokenizer.")
-        else:
-            formatted_prompt = tokenizer_instance.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+        formatted_prompt = tokenizer_instance.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
     except Exception as e:
-        print(f"Error applying chat template: {e}")
+        print(f"Error applying chat template for model {tokenizer_instance.name_or_path}: {e}")
         print(traceback.format_exc())
-
-        if messages[0]['role'] == 'system':
-            formatted_prompt = messages[0]['content'] + "\n\n" + messages[1]['content']
-        else:
-            formatted_prompt = messages[0]['content']
-        print("Warning: Using basic concatenation for prompt due to template application error.")
+        raise ValueError('apply_chat_template fails.')
 
     print("\n---- DEBUG: format_llm_prompt - PROMPT TO TOKENIZER (STRUCTURE) ----")
-    # truncate print outputs for very long strings (like PDF content)
     system_content_preview = messages[0]['content'][:200] + ("..." if len(messages[0]['content']) > 200 else "")
     print(f"System Prompt: {system_content_preview}")
 
@@ -197,13 +175,11 @@ def format_llm_prompt(
          user_content_preview_start = messages[1]['content'][:300] + ("..." if len(messages[1]['content']) > 300 else "")
          user_content_preview_end = ("..." if len(messages[1]['content']) > 600 else "") + messages[1]['content'][-300:]
          print(f"User Content (start): {user_content_preview_start}")
-         if len(messages[1]['content']) > 600 : # only print end if it's different enough from start
+         if len(messages[1]['content']) > 600 :
             print(f"User Content (end): {user_content_preview_end}")
 
     prompt_length = len(formatted_prompt)
     print(f"--- Generated Prompt String Length: {prompt_length} ---")
-    # optionally print a small piece of the actual formatted prompt for verification
-    # print(f"--- Formatted Prompt Snippet: {formatted_prompt[:200]}... ---")
     print("------------------------------------------------------------------\n")
     return formatted_prompt
 
@@ -275,23 +251,8 @@ def answer(msg: str, state: Dict[str, Any]):
         print(traceback.format_exc())
         llm_response_text = "Sorry, an error occurred while generating the response. Please check the console for details."
 
-    warning_message = ""
-    num_rounds_completed = len(conversation_history_for_prompt)
-
-    if num_rounds_completed + 1 >= MAX_CONVERSATION_ROUNDS:
-        warning_message = (
-            f"\n\n---\n**SYSTEM WARNING:** Conversation has reached {num_rounds_completed + 1} rounds "
-            f"(max {MAX_CONVERSATION_ROUNDS}). To ensure optimal performance and context accuracy, "
-            "please **reset the chat and PDF** to start a new session for further questions."
-        )
-    elif num_rounds_completed + 1 >= WARNING_CONVERSATION_ROUNDS:
-        warning_message = (
-            f"\n\n---\n**SYSTEM INFO:** Conversation at {num_rounds_completed + 1} rounds. "
-            f"The context includes up to {MAX_CONVERSATION_ROUNDS} rounds. For very long discussions, "
-            "consider starting a new session by resetting the chat and PDF."
-        )
-
-    final_assistant_response = llm_response_text.strip() + warning_message
+    # Removed warning_message logic
+    final_assistant_response = llm_response_text.strip()
 
     if ui_messages and ui_messages[-1]["role"] == "assistant":
         ui_messages[-1]["content"] = final_assistant_response
@@ -386,7 +347,7 @@ def build_ui(port: int, share_the_ui: bool):
 
         gr.Markdown(FOOTER_TEXT, elem_id="footer-info-md")
         gr.Markdown(
-            f"<small>Device: {_device()} | LLM: {MODEL_ID} | Max Rounds: {MAX_CONVERSATION_ROUNDS}</small>",
+            f"<small>Device: {_device()} | LLM: {MODEL_ID}</small>",
             elem_id="device-model-info-md",
         )
     print(f"Starting {AGENT_NAME} on http://0.0.0.0:{port}")
@@ -449,9 +410,15 @@ if __name__ == "__main__":
         print(f"ERROR: Could not read system prompt file '{system_prompt_path}': {e}")
         exit(1)
 
-    LLM, TOKENIZER = load_llm_and_tokenizer(
-        MODEL_ID, max_new=args.max_new_tokens, cli_args=args
-    )
+    # load_llm_and_tokenizer will now raise an error if template is missing,
+    # so the script will exit here if there's an issue.
+    try:
+        LLM, TOKENIZER = load_llm_and_tokenizer(
+            MODEL_ID, max_new=args.max_new_tokens, cli_args=args
+        )
+    except ValueError as e: # Catch the specific error raised for missing templates
+        print(e)
+        exit(1)
 
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
         missing_init = []

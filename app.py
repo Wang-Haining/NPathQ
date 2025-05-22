@@ -163,22 +163,21 @@ Follow Up Input: {question}
 Standalone question:"""
     CONDENSE_QUESTION_PROMPT_CUSTOM = PromptTemplate.from_template(_template)
 
-    # the LLMChain for question_generator will use the main llm_instance
     question_generator_chain = LLMChain(
         llm=llm_instance, prompt=CONDENSE_QUESTION_PROMPT_CUSTOM
     )
 
     return ConversationalRetrievalChain.from_llm(
-        llm=llm_instance,  # Same LLM instance for the final answer
+        llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
         combine_docs_chain_kwargs={"prompt": final_answer_prompt},
-        question_generator=question_generator_chain,
+        question_generator=question_generator_chain, # This is correct
         return_source_documents=False,
     )
 
 
 def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
-    global LLM, TOKENIZER, SYSTEM_PROMPT  # CONDENSE_LLM removed from globals here
+    global LLM, TOKENIZER, SYSTEM_PROMPT
     if pdf_file_obj is None:
         raise gr.Error("Please upload a PDF first.")
 

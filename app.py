@@ -93,7 +93,7 @@ def vector_store(text: str):
 class ChatTemplatePrompt(StringPromptTemplate):
     """Wrap HF `tokenizer.chat_template` so LangChain can inject vars."""
 
-    input_variables: ClassVar[List[str]] = ["context", "question"]
+    input_variables: ClassVar[List[str]] = ["context", "question", "chat_history"]
     _system_prompt: str = PrivateAttr()
     _tokenizer: Any = PrivateAttr()
 
@@ -107,15 +107,27 @@ class ChatTemplatePrompt(StringPromptTemplate):
     def format(self, **kwargs) -> str:
         ctx = kwargs["context"]
         query = kwargs["question"]
+        chat_history_tuples = kwargs.get("chat_history", []) # Get chat_history
 
-        messages = [
-            {"role": "system", "content": self._system_prompt},
+        messages = [{"role": "system", "content": self._system_prompt}]
+
+        # add past conversation turns
+        for user_msg, ai_msg in chat_history_tuples:
+            messages.append({"role": "user", "content": user_msg})
+            messages.append({"role": "assistant", "content": ai_msg})
+
+        # add current user query with context
+        messages.append(
             {
                 "role": "user",
                 "content": f"Based on the following context:\n\n{ctx}\n\n"
-                f"Answer this question:\n{query}",
-            },
-        ]
+                           f"Answer this question:\n{query}",
+            }
+        )
+
+        return self._tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
 
         # debug print for the generated prompt from chat template
         # formatted_prompt_str = self._tokenizer.apply_chat_template(

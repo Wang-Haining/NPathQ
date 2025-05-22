@@ -97,8 +97,12 @@ Contact: [hw56@iu.edu](mailto:hw56@iu.edu)
 
 ## 📄 License
 
-MIT License (or replace with your institution’s license as applicable)
+Released under the MIT License.  
+(You may replace this with your institution’s license if applicable.)
 
-## Version
+---
 
-- May 21, 2025, v0.0.1: debut  
+## 🗓️ Version History
+
+- v0.0.1: *May 21, 2025*: Initial release
+

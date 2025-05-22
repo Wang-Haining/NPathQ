@@ -89,9 +89,9 @@ class FirstLineParser(BaseOutputParser):
         for line in text.splitlines():
             line = line.strip()
             if line:
-                # print(f"DEBUG FirstLineParser: Returning line: '{line}'")
+                print(f"DEBUG FirstLineParser: Returning line: '{line}'")
                 return line
-        # print(f"DEBUG FirstLineParser: Received text='{text}', could not parse a valid line.")
+        print(f"DEBUG FirstLineParser: Received text='{text}', could not parse a valid line.")
         raise OutputParserException(f"condense LLM returned no usable content. Raw output: '{text[:200]}...'")
 
 
@@ -196,7 +196,7 @@ class ChatTemplatePrompt(StringPromptTemplate):
         return "chat-template-prompt"
 
 
-def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance): # Adopting Claude's suggestion
+def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
     """Create a ConversationalRetrievalChain with custom question generation."""
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
@@ -256,7 +256,7 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     )
 
 
-def answer(msg: str, state: Dict[str, Any]): # Adopting Claude's debug in answer
+def answer(msg: str, state: Dict[str, Any]):
     if not msg.strip():
         yield state.get("ui_messages", []), state
         return
@@ -290,7 +290,7 @@ def answer(msg: str, state: Dict[str, Any]): # Adopting Claude's debug in answer
         # debug: check if we can access the question generator and its output
         if hasattr(chain, 'question_generator') and chain.question_generator:
             try:
-                # Note: LLMChain's output is a dict with 'text' key if output_parser is not str
+                # note: LLMChain's output is a dict with 'text' key if output_parser is not str
                 # if FirstLineParser returns str, then condensed_q_result will be str
                 # for LLMChain, the input keys must match the prompt's input_variables
                 # CONDENSE_PROMPT expects "question" and "chat_history"

@@ -13,10 +13,11 @@ Workflow
    fuzzy cut‑offs from hiding facts that straddle chunk boundaries. Each
    chunk is embedded with *all‑MiniLM‑L6‑v2*.
 4. Chunks are stored in a local FAISS index.
-5. A `ConversationalRetrievalChain` is used. It internally creates a standalone
-   question from the conversation history and the new user question. This is done
-   using a custom `LLMChain` (the `question_generator`) which uses a `ChatPromptTemplate`
-   and a `FirstLineParser` to ensure the standalone question is concise.
+5. A `ConversationalRetrievalChain` is used. Its question generation component is
+   customized by creating a separate `LLMChain` (using a dedicated `ChatPromptTemplate`
+   and `FirstLineParser`) and then manually assigning it to the `question_generator`
+   attribute of the `ConversationalRetrievalChain` instance. This ensures the
+   standalone question for retrieval is concise.
 6. The standalone question is used to retrieve relevant document chunks.
 7. These chunks, along with the original conversation history (as a string) and
    the condensed question, are formatted using a custom `ChatTemplatePrompt` that
@@ -34,13 +35,12 @@ import gradio as gr
 import torch
 from docling.document_converter import DocumentConverter
 from langchain.chains import ConversationalRetrievalChain, LLMChain
-from langchain.prompts.chat import ChatPromptTemplate # your import
-from langchain.schema import BaseOutputParser, OutputParserException # your import
+from langchain.prompts.chat import ChatPromptTemplate
+from langchain.schema import BaseOutputParser, OutputParserException
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
 from langchain_community.vectorstores import FAISS
-# langchain_core.prompts.PromptTemplate is not explicitly used if CONDENSE_PROMPT is ChatPromptTemplate
 from langchain_core.prompts import StringPromptTemplate
 from pydantic import PrivateAttr
 from transformers import AutoTokenizer
@@ -53,7 +53,7 @@ TOKENIZER = None
 SYSTEM_PROMPT = None
 MODEL_ID = None
 
-
+# your new condense prompt structure
 CONDENSE_SYSTEM = """
 You are a retrieval-assistant whose **sole job** is to
 turn a follow-up user message plus the running chat history
@@ -89,8 +89,9 @@ class FirstLineParser(BaseOutputParser):
         for line in text.splitlines():
             line = line.strip()
             if line:
+                # print(f"DEBUG FirstLineParser: Returning line: '{line}'")
                 return line
-
+        # print(f"DEBUG FirstLineParser: Received text='{text}', could not parse a valid line.")
         raise OutputParserException(f"condense LLM returned no usable content. Raw output: '{text[:200]}...'")
 
 
@@ -104,8 +105,8 @@ def _device() -> str:
 
 def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     """
-    Loads the main VLLM instance and the tokenizer.
-    This single LLM instance will be used for both condensing and final answers.
+    loads the main VLLM instance and the tokenizer.
+    this single LLM instance will be used for both condensing and final answers.
     """
     print("Loading VLLM and tokenizer...")
     is_70b = "70b" in model_id.lower()
@@ -184,7 +185,6 @@ class ChatTemplatePrompt(StringPromptTemplate):
         formatted_prompt_str = self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        # debug
         print("\n---- DEBUG: ChatTemplatePrompt.format() - PROMPT TO TOKENIZER ----")
         print(f"Raw condensed question received by ChatTemplatePrompt: '{query}'")
         print(formatted_prompt_str)
@@ -196,26 +196,31 @@ class ChatTemplatePrompt(StringPromptTemplate):
         return "chat-template-prompt"
 
 
-def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance):
-    # prompt for the final answer
+def qa_chain(vstore, system_prompt_content: str, llm_instance, tokenizer_instance): # Adopting Claude's suggestion
+    """Create a ConversationalRetrievalChain with custom question generation."""
     final_answer_prompt = ChatTemplatePrompt(system_prompt_content, tokenizer_instance)
 
-    # question-generator chain using your CONDENSE_PROMPT (ChatPromptTemplate)
-    # and crucially, your FirstLineParser
-    question_generator_chain = LLMChain(
+    # create the question generator chain separately
+    question_generator_custom_chain = LLMChain( # Renamed variable for clarity
         llm=llm_instance,
         prompt=CONDENSE_PROMPT,
         output_parser=FirstLineParser(),
     )
 
-    return ConversationalRetrievalChain.from_llm(
+    # create the chain without conflicting parameters for question generation initially
+    chain = ConversationalRetrievalChain.from_llm(
         llm=llm_instance,
         retriever=vstore.as_retriever(search_kwargs={"k": 4}),
-        question_generator=question_generator_chain, # Pass the fully formed LLMChain
         combine_docs_chain_kwargs={"prompt": final_answer_prompt},
-        # DO NOT pass condense_question_prompt or condense_question_llm here
         return_source_documents=False,
+        # deliberately omit question_generator and condense_question_prompt here
+        # so .from_llm uses its default internal setup for question_generator
     )
+
+    # manually set the question generator to use our custom one, overwriting the default
+    chain.question_generator = question_generator_custom_chain
+
+    return chain
 
 
 def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
@@ -239,7 +244,6 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     txt = pdf_to_text(Path(pdf_file_obj.name))
     vstore = vector_store(txt)
 
-    # pass the single LLM instance and tokenizer to qa_chain
     state["chain"] = qa_chain(vstore, SYSTEM_PROMPT, LLM, TOKENIZER)
     state["langchain_history"] = []
     ui_message = [{"role": "system", "content": "PDF parsed. Ask away!"}]
@@ -252,7 +256,7 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     )
 
 
-def answer(msg: str, state: Dict[str, Any]):
+def answer(msg: str, state: Dict[str, Any]): # Adopting Claude's debug in answer
     if not msg.strip():
         yield state.get("ui_messages", []), state
         return
@@ -283,11 +287,29 @@ def answer(msg: str, state: Dict[str, Any]):
 
     current_assistant_response = ""
     try:
-        # debug
-        condensed_q_result = chain.question_generator.invoke({"question": msg, "chat_history": langchain_history})
-        print(f"DEBUG: Condensed question from question_generator: '{condensed_q_result}'")
-        if isinstance(condensed_q_result, dict):
-           print(f"DEBUG: Condensed question (dict text): '{condensed_q_result.get('text')}'")
+        # debug: check if we can access the question generator and its output
+        if hasattr(chain, 'question_generator') and chain.question_generator:
+            try:
+                # Note: LLMChain's output is a dict with 'text' key if output_parser is not str
+                # If FirstLineParser returns str, then condensed_q_result will be str
+                # For LLMChain, the input keys must match the prompt's input_variables
+                # CONDENSE_PROMPT expects "question" and "chat_history"
+                invoke_payload = {"question": msg, "chat_history": langchain_history}
+                # print(f"DEBUG: Invoking question_generator with: {invoke_payload}") # More debug
+                condensed_q_result = chain.question_generator.invoke(invoke_payload)
+
+                print(f"DEBUG: Type of condensed_q_result: {type(condensed_q_result)}")
+                if isinstance(condensed_q_result, dict): # LLMChain without a StrOutputParser or similar might return dict
+                    actual_condensed_question = condensed_q_result.get('text', str(condensed_q_result))
+                    print(f"DEBUG: Condensed question from question_generator (dict): '{actual_condensed_question}'")
+                else: # Should be a string if FirstLineParser worked
+                    actual_condensed_question = str(condensed_q_result)
+                    print(f"DEBUG: Condensed question from question_generator (direct): '{actual_condensed_question}'")
+
+            except Exception as debug_e:
+                print(f"DEBUG: Error during question_generator invocation: {debug_e}")
+                print(traceback.format_exc())
+
 
         response_payload = chain.invoke(
             {"question": msg, "chat_history": langchain_history}

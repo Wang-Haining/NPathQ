@@ -98,7 +98,7 @@ class ChatTemplatePrompt(StringPromptTemplate):
 
     # tell Pydantic these two attrs are just implementation details
     _system_prompt: str = PrivateAttr()
-    _tokenizer: Any     = PrivateAttr()
+    _tokenizer: Any = PrivateAttr()
     # -------------------------------------------------------
 
     def __init__(self, system_prompt: str, tokenizer):
@@ -107,14 +107,16 @@ class ChatTemplatePrompt(StringPromptTemplate):
         self._tokenizer = tokenizer
 
     def format(self, **kwargs) -> str:
-        ctx   = kwargs["context"]
+        ctx = kwargs["context"]
         query = kwargs["question"]
 
         messages = [
             {"role": "system", "content": self._system_prompt},
-            {"role": "user",
-             "content": f"Based on the following context:\n\n{ctx}\n\n"
-                        f"Answer this question:\n{query}"}
+            {
+                "role": "user",
+                "content": f"Based on the following context:\n\n{ctx}\n\n"
+                f"Answer this question:\n{query}",
+            },
         ]
         return self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -153,10 +155,10 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
 
     state["chain"] = qa_chain(vstore, SYSTEM_PROMPT, LLM, TOKENIZER)
     state["langchain_history"] = []
-    initial_ui_message = [{"role": "system", "content": "PDF parsed. Ask away!"}]
-    state["ui_messages"] = initial_ui_message
+    ui_message = [{"role": "system", "content": "PDF parsed. Ask away!"}]
+    state["ui_messages"] = ui_message
 
-    return initial_ui_message, state
+    return ui_message, state, gr.Textbox.update(interactive=True)
 
 
 def answer(msg: str, state: Dict[str, Any]):
@@ -165,9 +167,15 @@ def answer(msg: str, state: Dict[str, Any]):
         return
 
     if "chain" not in state or not state["chain"]:
-        raise gr.Error(
-            "PDF not processed or chain not initialized. Please upload a PDF first."
+        ui = state.get("ui_messages", [])
+        ui.append(
+            {
+                "role": "assistant",
+                "content": "🔄 Still parsing the PDF… I’ll be ready in a few seconds.",
+            }
         )
+        yield ui, state
+        return
 
     ui_messages = state.get("ui_messages", []).copy()
     langchain_history = state.get("langchain_history", []).copy()
@@ -272,9 +280,13 @@ def build_ui(port: int):
             scale=7,
         )
         pdf_file.change(
-            upload_pdf, inputs=[pdf_file, app_state], outputs=[chat, app_state]
+            upload_pdf, inputs=[pdf_file, app_state], outputs=[chat, app_state, box]
         )
-        reset_btn.click(reset_session, inputs=[app_state], outputs=[chat, app_state])
+
+        reset_btn.click(
+            reset_session, inputs=[app_state], outputs=[chat, app_state]
+        ).then(lambda: gr.Textbox.update(interactive=False), None, [box])
+
         box.submit(fn=answer, inputs=[box, app_state], outputs=[chat, app_state])
         box.submit(fn=lambda: "", inputs=None, outputs=[box], queue=False)
         gr.Markdown(FOOTER_TEXT, elem_id="footer-info-md")

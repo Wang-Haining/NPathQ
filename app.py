@@ -105,8 +105,8 @@ def _device() -> str:
 
 def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     """
-    loads the main VLLM instance and the tokenizer.
-    this single LLM instance will be used for both condensing and final answers.
+    Loads the main VLLM instance and the tokenizer.
+    This single LLM instance will be used for both condensing and final answers.
     """
     print("Loading VLLM and tokenizer...")
     is_70b = "70b" in model_id.lower()
@@ -291,18 +291,18 @@ def answer(msg: str, state: Dict[str, Any]): # Adopting Claude's debug in answer
         if hasattr(chain, 'question_generator') and chain.question_generator:
             try:
                 # Note: LLMChain's output is a dict with 'text' key if output_parser is not str
-                # If FirstLineParser returns str, then condensed_q_result will be str
-                # For LLMChain, the input keys must match the prompt's input_variables
+                # if FirstLineParser returns str, then condensed_q_result will be str
+                # for LLMChain, the input keys must match the prompt's input_variables
                 # CONDENSE_PROMPT expects "question" and "chat_history"
                 invoke_payload = {"question": msg, "chat_history": langchain_history}
-                # print(f"DEBUG: Invoking question_generator with: {invoke_payload}") # More debug
+                print(f"DEBUG: Invoking question_generator with: {invoke_payload}")
                 condensed_q_result = chain.question_generator.invoke(invoke_payload)
 
                 print(f"DEBUG: Type of condensed_q_result: {type(condensed_q_result)}")
-                if isinstance(condensed_q_result, dict): # LLMChain without a StrOutputParser or similar might return dict
+                if isinstance(condensed_q_result, dict):
                     actual_condensed_question = condensed_q_result.get('text', str(condensed_q_result))
                     print(f"DEBUG: Condensed question from question_generator (dict): '{actual_condensed_question}'")
-                else: # Should be a string if FirstLineParser worked
+                else: # should be a string if FirstLineParser worked
                     actual_condensed_question = str(condensed_q_result)
                     print(f"DEBUG: Condensed question from question_generator (direct): '{actual_condensed_question}'")
 

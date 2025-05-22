@@ -21,6 +21,7 @@ Workflow
 """
 
 import argparse
+import traceback
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List
 
@@ -32,7 +33,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import VLLM
 from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import StringPromptTemplate
+from langchain_core.prompts import PromptTemplate, StringPromptTemplate
 from pydantic import PrivateAttr
 from transformers import AutoTokenizer
 
@@ -60,7 +61,6 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 1024):
         tensor_parallel_size=2 if '70b' in model_id.lower() else 1,
         enforce_eager=True if '70b' in model_id.lower() else False,
         dtype="bfloat16",
-        streaming=True,
         temperature=0.7,
         top_p=0.95,
     )
@@ -260,6 +260,7 @@ def answer(msg: str, state: Dict[str, Any]):
 
     except Exception as e:
         print(f"Error during LLM invocation: {e}")
+        print(traceback.format_exc())
         current_assistant_response = "Sorry, an error occurred while generating the response."
 
     # update the last message in ui_messages (the assistant's placeholder) with the actual response
@@ -315,7 +316,7 @@ FOOTER_TEXT = (
 )
 
 
-def build_ui(port: int, share: bool):
+def build_ui(port: int, share_ui: bool):
     global MODEL_ID
     with gr.Blocks(css=CUSTOM_CSS) as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
@@ -373,7 +374,7 @@ def build_ui(port: int, share: bool):
             elem_id="device-model-info-md",
         )
     print(f"Starting {AGENT_NAME} on http://0.0.0.0:{port}")
-    demo.launch(server_name="0.0.0.0", server_port=port, share=False)
+    demo.launch(server_name="0.0.0.0", server_port=port, share_ui=False)
 
 
 if __name__ == "__main__":
@@ -400,7 +401,7 @@ if __name__ == "__main__":
         help="Max new tokens for LLM generation.",
     )
     parser.add_argument(
-        "--share", action="store_true",
+        "--share_ui", action="store_true",
         help="Enable external access to the app via public Gradio link."
     )
     args = parser.parse_args()
@@ -442,4 +443,4 @@ if __name__ == "__main__":
             f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting."
         )
 
-    build_ui(args.port, share=args.share)
+    build_ui(args.port, share_ui=args.share_ui)

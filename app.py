@@ -80,11 +80,19 @@ def load_llm_and_tokenizer(model_id: str, max_new: int = 2048, cli_args=None):
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
     if tokenizer.chat_template:
-        print(f"Tokenizer for {model_id} loaded with its own chat_template from config.")
-    elif hasattr(tokenizer, 'default_chat_template') and tokenizer.default_chat_template:
-        print(f"INFO: Tokenizer for {model_id} did not have a chat_template in its config. "
-              f"Using its `default_chat_template` provided by the transformers library.")
-        tokenizer.chat_template = tokenizer.default_chat_template # Explicitly set it for consistency
+        print(
+            f"Tokenizer for {model_id} loaded with its own chat_template from config."
+        )
+    elif (
+        hasattr(tokenizer, "default_chat_template") and tokenizer.default_chat_template
+    ):
+        print(
+            f"INFO: Tokenizer for {model_id} did not have a chat_template in its config. "
+            f"Using its `default_chat_template` provided by the transformers library."
+        )
+        tokenizer.chat_template = (
+            tokenizer.default_chat_template
+        )  # Explicitly set it for consistency
     else:
         # If no template is found from config or library defaults, raise an error.
         error_message = (
@@ -143,7 +151,7 @@ def format_llm_prompt(
             history_block_parts.append(f"Assistant: {str(assistant_msg)}")
 
         # first, create the multi-line string for the history block
-        joined_history_str = '\n'.join(history_block_parts)
+        joined_history_str = "\n".join(history_block_parts)
 
         # then, create the full history section string using an f-string
         history_section_text = f"**Conversation History (most recent {len(relevant_history)} turns):**\n{joined_history_str}"
@@ -163,19 +171,27 @@ def format_llm_prompt(
             messages, tokenize=False, add_generation_prompt=True
         )
     except Exception as e:
-        print(f"Error applying chat template for model {tokenizer_instance.name_or_path}: {e}")
+        print(
+            f"Error applying chat template for model {tokenizer_instance.name_or_path}: {e}"
+        )
         print(traceback.format_exc())
-        raise ValueError('apply_chat_template fails.')
+        raise ValueError("apply_chat_template fails.")
 
     print("\n---- DEBUG: format_llm_prompt - PROMPT TO TOKENIZER (STRUCTURE) ----")
-    system_content_preview = messages[0]['content'][:200] + ("..." if len(messages[0]['content']) > 200 else "")
+    system_content_preview = messages[0]["content"][:200] + (
+        "..." if len(messages[0]["content"]) > 200 else ""
+    )
     print(f"System Prompt: {system_content_preview}")
 
     if len(messages) > 1:
-         user_content_preview_start = messages[1]['content'][:300] + ("..." if len(messages[1]['content']) > 300 else "")
-         user_content_preview_end = ("..." if len(messages[1]['content']) > 600 else "") + messages[1]['content'][-300:]
-         print(f"User Content (start): {user_content_preview_start}")
-         if len(messages[1]['content']) > 600 :
+        user_content_preview_start = messages[1]["content"][:300] + (
+            "..." if len(messages[1]["content"]) > 300 else ""
+        )
+        user_content_preview_end = (
+            "..." if len(messages[1]["content"]) > 600 else ""
+        ) + messages[1]["content"][-300:]
+        print(f"User Content (start): {user_content_preview_start}")
+        if len(messages[1]["content"]) > 600:
             print(f"User Content (end): {user_content_preview_end}")
 
     prompt_length = len(formatted_prompt)
@@ -190,9 +206,12 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
         raise gr.Error("Please upload a PDF first.")
 
     missing = []
-    if LLM is None: missing.append("LLM")
-    if TOKENIZER is None: missing.append("Tokenizer")
-    if SYSTEM_PROMPT is None: missing.append("System Prompt")
+    if LLM is None:
+        missing.append("LLM")
+    if TOKENIZER is None:
+        missing.append("Tokenizer")
+    if SYSTEM_PROMPT is None:
+        missing.append("System Prompt")
     if missing:
         raise gr.Error(
             f"{', '.join(missing)} not initialized. Please ensure system_prompt.md exists and restart."
@@ -201,7 +220,12 @@ def upload_pdf(pdf_file_obj: gr.File, state: Dict[str, Any]):
     txt = pdf_to_text(Path(pdf_file_obj.name))
     state["pdf_text"] = txt
     state["conversation_history"] = []
-    ui_message = [{"role": "system", "content": "PDF parsed. You can now ask questions about its content."}]
+    ui_message = [
+        {
+            "role": "system",
+            "content": "PDF parsed. You can now ask questions about its content.",
+        }
+    ]
     state["ui_messages"] = ui_message
 
     return (
@@ -219,7 +243,10 @@ def answer(msg: str, state: Dict[str, Any]):
     pdf_text = state.get("pdf_text")
     if not pdf_text:
         current_ui_messages = state.get("ui_messages", []).copy()
-        if not current_ui_messages or current_ui_messages[-1].get("content") != "Please upload a PDF first.":
+        if (
+            not current_ui_messages
+            or current_ui_messages[-1].get("content") != "Please upload a PDF first."
+        ):
             current_ui_messages.append(
                 {"role": "assistant", "content": "Please upload a PDF first."}
             )
@@ -271,7 +298,15 @@ def reset_session(state: Dict[str, Any]):
     state["pdf_text"] = None
     state["conversation_history"] = []
     state["ui_messages"] = initial_ui_messages
-    return initial_ui_messages, state, gr.update(value="", placeholder="Upload a PDF to begin asking questions.", interactive=False)
+    return (
+        initial_ui_messages,
+        state,
+        gr.update(
+            value="",
+            placeholder="Upload a PDF to begin asking questions.",
+            interactive=False,
+        ),
+    )
 
 
 CUSTOM_CSS = """
@@ -302,7 +337,9 @@ def build_ui(port: int, share_the_ui: bool):
         gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
         gr.Markdown("Simplified Neuropathology Report QA Agent", elem_id="sub-title-md")
 
-        initial_ui_messages_val = [{"role": "system", "content": "Please upload a PDF to begin."}]
+        initial_ui_messages_val = [
+            {"role": "system", "content": "Please upload a PDF to begin."}
+        ]
         app_state = gr.State(
             {
                 "pdf_text": None,
@@ -320,7 +357,7 @@ def build_ui(port: int, share_the_ui: bool):
             height=500,
             show_copy_button=True,
             layout="panel",
-            type="messages"
+            type="messages",
         )
 
         box = gr.Textbox(
@@ -337,9 +374,7 @@ def build_ui(port: int, share_the_ui: bool):
         )
 
         reset_btn.click(
-            reset_session,
-            inputs=[app_state],
-            outputs=[chat, app_state, box]
+            reset_session, inputs=[app_state], outputs=[chat, app_state, box]
         )
 
         box.submit(fn=answer, inputs=[box, app_state], outputs=[chat, app_state])
@@ -392,11 +427,17 @@ if __name__ == "__main__":
 
     system_prompt_path = Path(args.prompt)
     if not system_prompt_path.exists():
-        print(f"ERROR: System prompt file '{system_prompt_path}' not found. Please create it.")
+        print(
+            f"ERROR: System prompt file '{system_prompt_path}' not found. Please create it."
+        )
         print("Example system_prompt.md content:")
         print("---")
-        print("You are NPathQ, a specialized AI assistant for Neuropathology Report Question Answering.")
-        print("Carefully analyze the provided neuropathology report content and the conversation history to answer the user's questions accurately and concisely.")
+        print(
+            "You are NPathQ, a specialized AI assistant for Neuropathology Report Question Answering."
+        )
+        print(
+            "Carefully analyze the provided neuropathology report content and the conversation history to answer the user's questions accurately and concisely."
+        )
         print("If the information is not in the report, state that explicitly.")
         print("---")
         exit(1)
@@ -416,15 +457,18 @@ if __name__ == "__main__":
         LLM, TOKENIZER = load_llm_and_tokenizer(
             MODEL_ID, max_new=args.max_new_tokens, cli_args=args
         )
-    except ValueError as e: # Catch the specific error raised for missing templates
+    except ValueError as e:  # Catch the specific error raised for missing templates
         print(e)
         exit(1)
 
     if LLM is None or TOKENIZER is None or SYSTEM_PROMPT is None:
         missing_init = []
-        if LLM is None: missing_init.append("LLM")
-        if TOKENIZER is None: missing_init.append("Tokenizer")
-        if SYSTEM_PROMPT is None: missing_init.append("SYSTEM_PROMPT text")
+        if LLM is None:
+            missing_init.append("LLM")
+        if TOKENIZER is None:
+            missing_init.append("Tokenizer")
+        if SYSTEM_PROMPT is None:
+            missing_init.append("SYSTEM_PROMPT text")
         raise RuntimeError(
             f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting."
         )

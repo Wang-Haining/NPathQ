@@ -91,56 +91,56 @@ def vector_store(text: str):
 
 
 class ChatTemplatePrompt(StringPromptTemplate):
-    """Wrap HF `tokenizer.chat_template` so LangChain can inject vars."""
+    """Wrap HF `tokenizer.chat_template` so LangChain can inject vars.
+    This version is designed to work with ConversationalRetrievalChain,
+    which passes 'chat_history' as a string and 'question' as the condensed standalone question.
+    """
 
     input_variables: ClassVar[List[str]] = ["context", "question", "chat_history"]
     _system_prompt: str = PrivateAttr()
     _tokenizer: Any = PrivateAttr()
 
     def __init__(self, system_prompt: str, tokenizer, **kwargs):
-        super().__init__(
-            input_variables=self.input_variables, **kwargs
-        )
+        super().__init__(input_variables=self.input_variables, **kwargs)
         self._system_prompt = system_prompt
         self._tokenizer = tokenizer
 
     def format(self, **kwargs) -> str:
-        ctx = kwargs["context"]
-        query = kwargs["question"]
+        ctx = kwargs["context"]  # retrieved documents
+        query = kwargs["question"]  # condensed standalone question from the chain
+        chat_history_str = kwargs.get("chat_history", "")  # stringified chat history from the chain
 
-        chat_history_input = kwargs.get("chat_history")
+        # construct the content for the 'user' role message.
+        # it will include past history (if any) and the current query with context.
+        user_message_content_parts = []
 
-        # debug
-        print(f"DEBUG ChatTemplatePrompt: received chat_history_input is of type: {type(chat_history_input)}")
-        if isinstance(chat_history_input, str):
-            print(f"DEBUG ChatTemplatePrompt: chat_history_input (string sample): \"{chat_history_input[:100]}...\"")
-        elif isinstance(chat_history_input, list) and chat_history_input:
-            print(f"DEBUG ChatTemplatePrompt: chat_history_input (list, first item type): {type(chat_history_input[0])}")
+        if chat_history_str and chat_history_str.strip():
+            # prepend the stringified history.
+            # LLM will see this as part of the current user's turn.
+            user_message_content_parts.append(
+                f"Here is the conversation history so far:\n{chat_history_str}\n---"
+            )
 
-        messages = [{"role": "system", "content": self._system_prompt}]
-
-        # process chat_history_input carefully
-        if isinstance(chat_history_input, list):
-            for item in chat_history_input:
-                if isinstance(item, (tuple, list)) and len(item) == 2:
-                    user_msg, ai_msg = item
-                    messages.append({"role": "user", "content": str(user_msg)})
-                    messages.append({"role": "assistant", "content": str(ai_msg)})
-                else:
-                    print(f"WARNING ChatTemplatePrompt: Skipping malformed item in chat_history list: {item}")
-        elif isinstance(chat_history_input, str) and chat_history_input.strip():
-            print("WARNING ChatTemplatePrompt: chat_history_input was a string. "
-                  "It will not be included in the structured 'messages' list for apply_chat_template. "
-                  "Conversational context from history might be lost for the LLM.")
-
-        # add current user query with context
-        messages.append(
-            {
-                "role": "user",
-                "content": f"Based on the following context:\n\n{ctx}\n\n"
-                           f"Answer this question:\n{query}",
-            }
+        # add the current query and its context
+        user_message_content_parts.append(
+            f"Based on the following context:\n\n{ctx}\n\n"
+            f"Answer this question:\n{query}"
         )
+
+        full_user_content = "\n\n".join(user_message_content_parts)
+
+        messages = [
+            {"role": "system", "content": self._system_prompt},
+            {"role": "user", "content": full_user_content},
+        ]
+
+        # debug: what the tokenizer will process
+        formatted_prompt_str = self._tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        print("\n---- DEBUG: ChatTemplatePrompt.format() - PROMPT TO TOKENIZER ----")
+        print(formatted_prompt_str)
+        print("------------------------------------------------------------------\n")
 
         return self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -222,11 +222,8 @@ def answer(msg: str, state: Dict[str, Any]):
 
     ui_messages.append({"role": "user", "content": msg})
     # add a placeholder for the assistant's response while processing
-    ui_messages.append({"role": "assistant", "content": "🤔 Thinking..."}) # You can customize this message
+    ui_messages.append({"role": "assistant", "content": "🤔 Thinking..."})
 
-    # update state with new user message and thinking indicator before yielding
-    # this ensures the UI reflects the change immediately
-    # state["ui_messages"] = ui_messages # Not strictly necessary to update state here if yield returns it
     yield ui_messages, state
 
     current_assistant_response = ""

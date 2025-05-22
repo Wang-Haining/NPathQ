@@ -303,7 +303,7 @@ FOOTER_TEXT = (
 )
 
 
-def build_ui(port: int):
+def build_ui(port: int, share: bool):
     global MODEL_ID
     with gr.Blocks(css=CUSTOM_CSS) as demo:
         gr.Markdown(f"# 🧠 {AGENT_NAME}", elem_id="main-title-md")
@@ -384,8 +384,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=1024,
+        default=2048,
         help="Max new tokens for LLM generation.",
+    )
+    parser.add_argument(
+        "--share", action="store_true",
+        help="Enable external access to the app via public Gradio link."
     )
     args = parser.parse_args()
 
@@ -426,4 +430,4 @@ if __name__ == "__main__":
             f"Critical components not initialized before UI build: {', '.join(missing_init)}. Exiting."
         )
 
-    build_ui(args.port)
+    build_ui(args.port, share=args.share)
